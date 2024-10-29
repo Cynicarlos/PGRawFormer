@@ -1,0 +1,7 @@
+exifread
+numpy==1.24.1
+rawpy==0.20.0
+tensorboard
+thop
+torchmetrics
+

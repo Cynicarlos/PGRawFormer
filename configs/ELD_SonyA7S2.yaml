@@ -1,0 +1,62 @@
+name: ELD_SonyA7S2
+manual_seed: 3407 # is all you need
+output: runs
+
+loss:
+  types:
+  - L1
+  weights:
+  - 1.0
+
+pretrained: /data/models/Carlos/RAWDenoising/runs/SONY/checkpoints/best_model.pth
+
+data:
+  name: ELDDataset
+  datadir: /data/dataset/Carlos/ELD/
+  camera: SonyA7S2
+  num_workers: 16
+  pin_memory: true
+  argument:
+    transpose: true
+    h_flip: true
+    v_flip: true
+  train:
+    batch_size: 1
+    pairs_file_path: SonyA7S2_Finetune.txt #24
+    patch_size: 512
+  test:
+    batch_size: 1
+    pairs_file_path: SonyA7S2_WO_Finetune.txt #96
+    
+
+model:
+  name: MetaNAFNet
+  MetaNAFNet:
+    img_channel: 4
+    width: 32 
+    num_meta_keys: 5
+    meta_table_size: [30,26,26,250,3]
+    meta_embedding_dims: 384
+    middle_blk_num: 1
+    enc_blk_nums: [1, 1, 1, 28]
+    dec_blk_nums: [1, 1, 1, 1]
+  
+train:
+  base_lr: 1.0e-4
+  last_lr_epoch: 20
+  clip_grad: 0.1
+  epochs: 20
+  lr_scheduler:
+    type: cosine
+  optimizer: 
+    type: adamw
+    eps: 1.0e-8
+    betas: [0.9, 0.999]
+  min_lr: 1.0e-4
+  weight_decay: 0
+  warmup_epochs: 0
+
+test:
+  merge_test: False
+  num_patch: null #null, -1, 2, 4
+  patch_size: null
