@@ -52,17 +52,20 @@ def load_checkpoint(config, checkpoint_path, model, optimizer, lr_scheduler, log
     msg = model.load_state_dict(checkpoint['model'], strict=False)
     logger.info(msg)
     psnr = 0.0
+    max_psnr = 0.0
     if not config.get('eval_mode', False) and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer'])
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
     if 'psnr' in checkpoint:
         psnr = checkpoint['psnr']
+    if 'max_psnr' in checkpoint:
+        max_psnr = checkpoint['max_psnr']
     if epoch is None and 'epoch' in checkpoint:
         config['train']['start_epoch'] = checkpoint['epoch']
         logger.info(f"=> loaded successfully '{checkpoint_path}' (epoch {checkpoint['epoch']})")
     del checkpoint
     torch.cuda.empty_cache()
-    return psnr
+    return psnr, max_psnr
 
 def load_pretrained_model(config, model, logger):
     checkpoint_path = config['pretrained']
@@ -79,21 +82,22 @@ def load_pretrained_model(config, model, logger):
     del checkpoint
     torch.cuda.empty_cache()
 
-def save_checkpoint(config, epoch, model, psnr, optimizer, lr_scheduler, is_best=False):
+def save_checkpoint(config, epoch, model, psnr, max_psnr, optimizer, lr_scheduler, is_best=False):
     save_state = {
         'model': model.state_dict(),
         'optimizer': optimizer.state_dict(),
         'lr_scheduler': lr_scheduler.state_dict(),
         'psnr': psnr,
+        'max_psnr': max_psnr,
         'epoch': epoch,
         'config': config
     }
 
     if is_best:
         save_path = os.path.join(config['output'], 'checkpoints', 'best_model.pth')
-    else:
-        save_path = os.path.join(config['output'], 'checkpoints', 'checkpoint.pth')
+        torch.save(save_state, save_path)
 
+    save_path = os.path.join(config['output'], 'checkpoints', 'checkpoint.pth')
     torch.save(save_state, save_path)
     
     if epoch % 100 == 0:

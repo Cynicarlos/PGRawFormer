@@ -451,16 +451,14 @@ from utils.registry import MODEL_REGISTRY
 @MODEL_REGISTRY.register()
 class MambaIR(nn.Module):
     def __init__(self,
-                 inp_channels=3,
-                 out_channels=3,
-                 dim=48,
-                 num_blocks=[4, 6, 6, 8],
+                 inp_channels=4,
+                 out_channels=4,
+                 dim=32,
+                 num_blocks=[2, 4, 4, 2],
                  mlp_ratio=2.,
-                 num_refinement_blocks=4,
+                 num_refinement_blocks=2,
                  drop_path_rate=0.,
-                 bias=False,
-                 dual_pixel_task=False  ## True for dual-pixel defocus deblurring only. Also set inp_channels=6
-                 ):
+                 bias=False):
 
         super(MambaIR, self).__init__()
         self.mlp_ratio = mlp_ratio
@@ -562,12 +560,6 @@ class MambaIR(nn.Module):
                 d_state=int(base_d_state * 2 ** 2),
             )
             for i in range(num_refinement_blocks)])
-
-        #### For Dual-Pixel Defocus Deblurring Task ####
-        self.dual_pixel_task = dual_pixel_task
-        if self.dual_pixel_task:
-            self.skip_conv = nn.Conv2d(dim, int(dim * 2 ** 1), kernel_size=1, bias=bias)
-        ###########################
 
         self.output = nn.Conv2d(int(dim * 2 ** 1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 

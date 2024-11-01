@@ -47,15 +47,11 @@ def main(config, args):
         train_total_loss, train_time = train_one_epoch(config, model, critierion, train_dataloader, optimizer, epoch, lr_scheduler, writer, with_metainfo=args.with_metainfo)
         logger.info(f'Train: [{epoch}/{config["train"]["epochs"]}] total loss: {train_total_loss:.6f} lr: {optimizer.param_groups[0]["lr"]:.6f} train_time: {train_time}')
         
-        psnr, ssim, valid_time = validate(config, model, valid_dataloader, epoch, writer, with_metainfo=args.with_metainfo)
-        save_checkpoint(config, epoch, model, psnr, optimizer, lr_scheduler, is_best=False)
-        if psnr >= max_psnr:
-            if psnr > max_psnr or ssim >= max_ssim:
-                save_checkpoint(config, epoch, model, psnr, optimizer, lr_scheduler, is_best=True)
-
+        psnr, ssim, valid_time = validate(config, model, valid_dataloader, epoch, writer, args.with_metainfo)
         max_psnr = max(max_psnr, psnr)
         max_ssim = max(max_ssim, ssim)
-    
+        save_checkpoint(config, epoch, model, psnr, max_psnr, optimizer, lr_scheduler, is_best=(psnr == max_psnr))
+
         logger.info(f'Valid: [{epoch}/{config["train"]["epochs"]}]  PSNR: {psnr:.2f}  Max_PSNR: {max_psnr:.2f}  SSIM:{ssim:.4f}  Max_SSIM: {max_ssim:.4f}  valid_time: {valid_time}')
         writer.add_scalar('eval/max_psnr', max_psnr, epoch)
         writer.add_scalar('eval/max_ssim', max_ssim, epoch)
@@ -210,7 +206,7 @@ def validate_metric(pred, gt):
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-cfg', required=True, type=str, help='Path to option YAML file.')
-    parser.add_argument('--with_metainfo', default=False, type=bool)
+    parser.add_argument('--with_metainfo', action='store_true', default=False)
     args = parser.parse_args()
     with open(args.cfg, 'r') as file:
         config = yaml.safe_load(file)

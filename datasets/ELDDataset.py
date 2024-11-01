@@ -19,31 +19,31 @@ class ELDDataset(Dataset):
         self.patch_size = patch_size
         self.pairs_file_path=os.path.join(datadir, pairs_file_path)
                 #===================================================================
-        self.keys = ['ExposureTime', 'FNumber', 'FocalLength', 'ISOSpeedRating', 'MeteringMode']
-        self.ExposureTime_table = [
-            0, 1/3200, 1/2000, 1/1600, 1/1000, 1/800, 1/500,
-            1/400, 1/250, 1/200, 1/160, 1/100, 1/80, 1/50,
-            1/40, 1/30, 1/25, 1/20, 1/15, 1/10, 1/8, 1/5,
-            1/4, 2/5, 1/2, 2, 16/5, 4, 10, 30
-        ]#29 intervals + 1 out of table
-        self.exposure_to_index = {i: idx for idx, i in enumerate(range(len(self.ExposureTime_table) - 1))}
+        #self.keys = ['ExposureTime', 'FNumber', 'FocalLength', 'ISOSpeedRating', 'MeteringMode']
+        #self.keys = ['ExposureTime', 'ISOSpeedRating', 'FNumber', 'FocalLength']
+        #self.ExposureTime_table = [
+        #    1/3200, 1/2000, 1/1600, 1/1000, 1/800, 1/500,1/400, 1/250, 1/200, 1/160, 1/100, 1/80, 1/50,1/40, 1/30, 1/25, 1/20, 1/15, 1/10, 1/8, 1/5,1/4, 2/5, 1/2, 2, 16/5, 4, 10, 30
+        #]#29 intervals + 1 out of table
+        #self.exposure_to_index = {i: idx for idx, i in enumerate(range(len(self.ExposureTime_table) - 1))}
         
-        self.ISOSpeedRating_table=[
-            50, 64, 80, 100, 160, 200, 250, 320, 400, 500, 
-            640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 
-            4000, 5000, 6400, 8000, 10000, 12800, 16000, 25600
-        ]#25 intervals + 1 out of table
-        self.iso_to_index = {i: idx for idx, i in enumerate(range(len(self.ISOSpeedRating_table) - 1))}
+        #self.ISOSpeedRating_table=[
+        #    50, 64, 80, 100, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800, 16000, 25600
+        #]#25 intervals + 1 out of table
+        #self.iso_to_index = {i: idx for idx, i in enumerate(range(len(self.ISOSpeedRating_table) - 1))}
         
-        self.Fnumber_table = [None] + [i for i in range(25)]#26
-        self.FocalLength_table = [None] + [i for i in range(1, 249)]#250
-        self.MeteringMode_table = [None, 'CenterWeightedAverage', 'Pattern']#3
+        #self.Fnumber_table = [None] + [i for i in range(25)]#26
+        #self.FocalLength_table = [None] + [i for i in range(1, 249)]#250
+        #self.MeteringMode_table = [None, 'CenterWeightedAverage', 'Pattern']#3
+        #self.Fnumber_table = [16/5, 4, 9/2, 5, 28/5, 63/10, 71/10, 8, 9, 10, 11, 13, 14, 16, 18, 22]
+        #self.FocalLength_table = [21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 38, 39, 41, 42, 44,  45, 46, 47, 48, 49, 50, 53, 54, 57, 59, 61, 63,66, 67, 73, 78, 82, 83, 87, 89, 90, 120, 128, 139, 166, 181, 223]
+        self.keys_min_max=[[1/3200, 30],[50, 25600],[16/5, 22],[21, 223]]
+        assert len(self.keys) == len(self.keys_min_max)
         self.dicts = {
             'ExposureTime': self.ExposureTime_table,
-            'FNumber': self.Fnumber_table,
-            'FocalLength': self.FocalLength_table,
             'ISOSpeedRating': self.ISOSpeedRating_table,
-            'MeteringMode': self.MeteringMode_table
+            'FNumber': self.Fnumber_table,
+            'FocalLength': self.FocalLength_table
+            #'MeteringMode': self.MeteringMode_table
         } 
         self.img_info=[]
         with open(self.pairs_file_path, 'r') as f:
@@ -88,14 +88,16 @@ class ELDDataset(Dataset):
         input = torch.from_numpy(input)
         gt = torch.from_numpy(gt)
         
-        input_metainfoidx = self.getMetaInfoIdx(input_meta)
-        gt_metainfoidx = self.getMetaInfoIdx(gt_meta)
+        #input_metainfoidx = self.getMetaInfoIdx(input_meta)
+        #gt_metainfoidx = self.getMetaInfoIdx(gt_meta)
+        input_metainfo = self.getMetaInfoTensor(input_meta)
+        gt_metainfo = self.getMetaInfoTensor(gt_meta)
 
         data = {
             'input_raw': input, 
             'gt_raw': gt, 
-            'input_metainfoidx': input_metainfoidx,
-            'gt_metainfoidx': gt_metainfoidx,
+            'input_metainfo': input_metainfo,
+            'gt_metainfo': gt_metainfo,
             'input_path':input_path, 
             'gt_path': gt_path
         }
@@ -105,6 +107,14 @@ class ELDDataset(Dataset):
     def __len__(self):
         return len(self.img_info)
     
+    def getMetaInfoTensor(self, metainfo):
+        infos = []
+        for i, (k, v) in enumerate(metainfo.items()):
+            min = self.keys_min_max[i][0]
+            max = self.keys_min_max[i][1]
+            infos.append(torch.tensor((v - min) / (max - min), dtype=torch.float32))
+        return torch.tensor(infos).unsqueeze(-1)
+    
     def metainfo(self, rawpath):
         with open(rawpath, 'rb') as f:
             tags = exifread.process_file(f)
@@ -112,13 +122,13 @@ class ELDDataset(Dataset):
             tag_prefix = 'Image' if suffix == '.dng' else 'EXIF'
             info = {
                 'ExposureTime': eval(str(tags[f'{tag_prefix} ExposureTime'])),
-                'FNumber': eval(str(tags[f'{tag_prefix} FNumber'])),
-                'FocalLength': eval(str(tags[f'{tag_prefix} FocalLength'])),
                 'ISOSpeedRating': eval(str(tags[f'{tag_prefix} ISOSpeedRatings'])),
-                'MeteringMode': str(tags[f'{tag_prefix} MeteringMode'])
+                'FNumber': eval(str(tags[f'{tag_prefix} FNumber'])),
+                'FocalLength': eval(str(tags[f'{tag_prefix} FocalLength']))
+                #'MeteringMode': str(tags[f'{tag_prefix} MeteringMode'])
             }
         return info
-    
+    '''
     def get_exposure_index(self, exposure):
         num_intervals = len(self.ExposureTime_table)
         for idx, boundary in enumerate(self.ExposureTime_table):
@@ -147,8 +157,9 @@ class ELDDataset(Dataset):
         idx_list.append(self.get_index_from_dict(metainfo['FNumber'], 'FNumber'))
         idx_list.append(self.get_index_from_dict(metainfo['FocalLength'], 'FocalLength'))
         idx_list.append(self.get_index_from_dict(metainfo['MeteringMode'], 'MeteringMode'))
-            
+
         return torch.tensor(idx_list , dtype=torch.long)
+    '''
     
     def crop_center_patch(self, input_raw, gt_raw, patch_size):
         '''

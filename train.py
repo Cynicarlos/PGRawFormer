@@ -42,13 +42,13 @@ def main(config, args):
     if args.auto_resume:
         auto_resume_path = os.path.join(config['output'], 'checkpoints', 'checkpoint.pth')
         if os.path.exists(auto_resume_path):
-            max_psnr = load_checkpoint(config, auto_resume_path, model, optimizer, lr_scheduler, logger)
+            psnr, max_psnr = load_checkpoint(config, auto_resume_path, model, optimizer, lr_scheduler, logger)
             #validate(config, model, critierion, valid_dataloader, config['train'].get('start_epoch', 0), writer)
         else:
             raise ValueError(f"Auto resume failed, no checkpoint found at {auto_resume_path}")
     elif args.resume:
-        max_psnr = load_checkpoint(config, args.resume, model, optimizer, lr_scheduler, logger)
-        validate(config, model, critierion, valid_dataloader, config['train'].get('start_epoch', 0), writer)
+        psnr, max_psnr = load_checkpoint(config, args.resume, model, optimizer, lr_scheduler, logger)
+        #validate(config, model, critierion, valid_dataloader, config['train'].get('start_epoch', 0), writer)
 
 
     logger.info("----------------------------------------Start training----------------------------------------")
@@ -61,15 +61,10 @@ def main(config, args):
         
         if epoch == 1 or epoch % 20 == 0 or epoch > 250:
             psnr, ssim, valid_time = validate(config, model, valid_dataloader, epoch, writer, args.with_metainfo)
-            
-            save_checkpoint(config, epoch, model, psnr, optimizer, lr_scheduler, is_best=False)
-            if psnr >= max_psnr:
-                if psnr > max_psnr or ssim >= max_ssim:
-                    save_checkpoint(config, epoch, model, psnr, optimizer, lr_scheduler, is_best=True)
-        
             max_psnr = max(max_psnr, psnr)
             max_ssim = max(max_ssim, ssim)
-        
+            save_checkpoint(config, epoch, model, psnr, max_psnr, optimizer, lr_scheduler, is_best=(psnr == max_psnr))
+
             logger.info(f'Valid: [{epoch}/{config["train"]["epochs"]}]  PSNR: {psnr:.2f}  Max_PSNR: {max_psnr:.2f}  SSIM:{ssim:.4f}  Max_SSIM: {max_ssim:.4f}  valid_time: {valid_time}')
             writer.add_scalar('eval/max_psnr', max_psnr, epoch)
             writer.add_scalar('eval/max_ssim', max_ssim, epoch)
@@ -94,8 +89,8 @@ def train_one_epoch(config, model, critierion, data_loader, optimizer, epoch, lr
         gt_raw = data['gt_raw'].cuda(non_blocking=True)
         
         if with_metainfo:
-            metainfoidx = data['input_metainfoidx'].cuda(non_blocking=True)
-            pred = model(input_raw, metainfoidx)#pred_raw
+            metainfo = data['input_metainfo'].cuda(non_blocking=True)
+            pred = model(input_raw, metainfo)#pred_raw
         else:
             pred = model(input_raw)#pred_raw
 
@@ -145,7 +140,7 @@ def validate(config, model, data_loader, epoch, writer, with_metainfo):
         gt_raw = data['gt_raw'].cuda(non_blocking=True)
         
         if with_metainfo:
-            metainfoidx = data['input_metainfoidx'].cuda(non_blocking=True)
+            metainfo = data['input_metainfo'].cuda(non_blocking=True)
         
         if config['test']['merge_test']:
             assert config['test']['num_patch'] is not None
@@ -155,7 +150,7 @@ def validate(config, model, data_loader, epoch, writer, with_metainfo):
                 assert patch_size is not None
                 input_raws = auto_crop(input_raw)
                 if with_metainfo:
-                    pres = [model(input_patch, metainfoidx) for input_patch in input_raws]
+                    pres = [model(input_patch, metainfo) for input_patch in input_raws]
                 else:
                     pres = [model(input_patch) for input_patch in input_raws]
                 h, w = input_raw.shape[2:]
@@ -165,7 +160,7 @@ def validate(config, model, data_loader, epoch, writer, with_metainfo):
             elif config['test']['num_patch'] == 2:
                 input_raws = crop_tow_patch(input_raw)
                 if with_metainfo:
-                    preds = [model(patch, metainfoidx) for patch in input_raws]
+                    preds = [model(patch, metainfo) for patch in input_raws]
                 else:
                     preds = [model(patch) for patch in input_raws]
                 pred = torch.cat(preds, dim=3)
@@ -173,7 +168,7 @@ def validate(config, model, data_loader, epoch, writer, with_metainfo):
             elif config['test']['num_patch'] == 4:
                 input_raws = crop_four_patch(input_raw)
                 if with_metainfo:
-                    preds = [model(patch, metainfoidx) for patch in input_raws]
+                    preds = [model(patch, metainfo) for patch in input_raws]
                 else:
                     preds = [model(patch) for patch in input_raws]
                 x_top = torch.cat(preds[:2], dim=3)
@@ -182,7 +177,7 @@ def validate(config, model, data_loader, epoch, writer, with_metainfo):
 
         else:
             if with_metainfo:
-                pred = model(input_raw, metainfoidx)
+                pred = model(input_raw, metainfo)
             else:
                 pred = model(input_raw)
 
