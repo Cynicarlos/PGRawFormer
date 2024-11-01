@@ -95,7 +95,9 @@ if __name__ == "__main__":
     model.load_state_dict(checkpoint['model'])
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--with_metainfo', default=False, type=bool)
+    parser.add_argument('--with_metainfo', action='store_true', default=False)
+    parser.add_argument('--merge_test', action='store_true', default=False)
+    parser.add_argument('--num_patch', type=int, default=None)
     args = parser.parse_args()
 
     cameras = ['CanonEOS70D']
@@ -108,7 +110,8 @@ if __name__ == "__main__":
             pairs_file_path = os.path.join(datadir, f'{camera}_WO_Finetune_{ratio}.txt')
             dataset = ELDDataset(datadir=datadir, camera=camera, pairs_file_path=pairs_file_path,patch_size=None)
             dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=16, pin_memory=True)
-            psrn, ssim, samples = test(model, dataloader, camera=camera, ratio=ratio, merge_test=False, num_patch=None, with_metainfo=args.with_metainfo)
+            psrn, ssim, samples = test(model, dataloader, camera=camera, ratio=ratio, 
+                                    merge_test=args.merge_test, num_patch=args.num_patch, with_metainfo=args.with_metainfo)
             total_psnr += psrn
             total_ssim += ssim
             total_samples += samples

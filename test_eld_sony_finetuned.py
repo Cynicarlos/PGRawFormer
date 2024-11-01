@@ -82,7 +82,7 @@ def test(model, dataloader, camera, ratio, merge_test=False, num_patch=None, wit
 if __name__ == "__main__":
     os.makedirs('results/ELD', exist_ok=True)
     #datadir='/root/autodl-tmp/datasets/ELD/'
-    datadir = '/data/dataset/Carlos/ELD/' #31
+    datadir = '/data/dataset/Carlos/ELD/' #30/31
     
     with open('configs/ELD_SonyA7S2.yaml', 'r') as file:
         config = yaml.safe_load(file)
@@ -90,16 +90,18 @@ if __name__ == "__main__":
     model_name, model = build_model(config['model'])
     model = model.cuda()
     
-    checkpoint = torch.load('/data/models/Carlos/RAWDenoising/runs/ELD_SonyA7S2/checkpoints/best_model.pth') #31
+    checkpoint = torch.load('/data/model/Carlos/RAWDenoising/runs/ELD_SonyA7S2/checkpoints/best_model.pth') #30
 
     model.load_state_dict(checkpoint['model'])
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--with_metainfo', default=False, type=bool)
+    parser.add_argument('--with_metainfo', action='store_true', default=False)
+    parser.add_argument('--merge_test', action='store_true', default=False)
+    parser.add_argument('--num_patch', type=int, default=None)
     args = parser.parse_args()
 
     cameras = ['SonyA7S2']
-    ratios = [1, 10, 100, 200]
+    ratios = [100, 200]
     for camera in cameras:
         total_psnr = 0.0
         total_ssim = 0.0
@@ -108,7 +110,8 @@ if __name__ == "__main__":
             pairs_file_path = os.path.join(datadir, f'{camera}_WO_Finetune_{ratio}.txt')
             dataset = ELDDataset(datadir=datadir, camera=camera, pairs_file_path=pairs_file_path,patch_size=None)
             dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=16, pin_memory=True)
-            psrn, ssim, samples = test(model, dataloader, camera=camera, ratio=ratio, merge_test=False, num_patch=None, with_metainfo=args.with_metainfo)
+            psrn, ssim, samples = test(model, dataloader, camera=camera, ratio=ratio, 
+                                    merge_test=args.merge_test, num_patch=args.num_patch, with_metainfo=args.with_metainfo)
             total_psnr += psrn
             total_ssim += ssim
             total_samples += samples

@@ -89,6 +89,8 @@ if __name__ == "__main__":
     data_dir='/data/dataset/Carlos/SID/Sony' #30
     parser = argparse.ArgumentParser()
     parser.add_argument('--with_metainfo', action='store_true', default=False)
+    parser.add_argument('--merge_test', action='store_true', default=False)
+    parser.add_argument('--num_patch', type=int, default=None)
     args = parser.parse_args()
     
     with open('configs/sony.yaml', 'r') as file:
@@ -110,7 +112,8 @@ if __name__ == "__main__":
     for test_file, ratio in zip(test_files, ratios):
         dataset = SIDSonyDataset(data_dir=data_dir, image_list_file=test_file, split='test')
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=16, pin_memory=True)
-        psnr, ssim, samples = test(model, dataloader, ratio=ratio, merge_test=False, num_patch=None, with_metainfo=args.with_metainfo)
+        psrn, ssim, samples = test(model, dataloader, camera=camera, ratio=ratio, 
+                                    merge_test=args.merge_test, num_patch=args.num_patch, with_metainfo=args.with_metainfo)
         all_ratio_psrn_sum += psnr
         all_ratio_ssim_sum += ssim
         total_samples += samples
