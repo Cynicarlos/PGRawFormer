@@ -1,8 +1,3 @@
-## Restormer: Efficient Transformer for High-Resolution Image Restoration
-## Syed Waqas Zamir, Aditya Arora, Salman Khan, Munawar Hayat, Fahad Shahbaz Khan, and Ming-Hsuan Yang
-## https://arxiv.org/abs/2111.09881
-
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -249,16 +244,31 @@ class Attention(nn.Module):
         return out
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type):
+    def __init__(self, dim, num_heads, ffn_expansion_factor, bias, LayerNorm_type):
         super(TransformerBlock, self).__init__()
 
         self.norm1 = LayerNorm(dim, LayerNorm_type)
-        self.attn = MetaAttention(dim, num_heads, num_meta_keys, meta_embedding_dims)
+        self.attn = Attention(dim, num_heads, bias)
+        self.norm2 = LayerNorm(dim, LayerNorm_type)
+        self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
+
+        return x
+    
+class MetaTransformerBlock(nn.Module):
+    def __init__(self, dim, num_heads, num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type):
+        super(MetaTransformerBlock, self).__init__()
+
+        self.norm1 = LayerNorm(dim, LayerNorm_type)
+        self.meta_attn = MetaAttention(dim, num_heads, num_meta_keys, meta_embedding_dims)
         self.norm2 = LayerNorm(dim, LayerNorm_type)
         self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
 
     def forward(self, x, metainfo):
-        x = x + self.attn(self.norm1(x), metainfo)
+        x = x + self.meta_attn(self.norm1(x), metainfo)
         x = x + self.ffn(self.norm2(x))
 
         return x
@@ -269,13 +279,13 @@ class MetaRawFormer(nn.Module):
     def __init__(self, 
         in_channels=4, 
         out_channels=4, 
-        dim=32,
+        dim=48,
         layers=4,
         num_meta_keys=4,
         #meta_table_size=[30,26,26,250],
         meta_embedding_dims=384,
-        num_blocks=[2,4,4,2], 
-        num_refinement_blocks=2,
+        num_blocks=[4,6,6,8], 
+        num_refinement_blocks=4,
         heads=[1,2,4,8],
         ffn_expansion_factor=2.66,
         bias=False,
@@ -296,7 +306,7 @@ class MetaRawFormer(nn.Module):
 
         self.encoders = nn.ModuleList([
             nn.ModuleList([
-                TransformerBlock(int(dim*2**i), heads[i], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
+                TransformerBlock(int(dim*2**i), heads[i], ffn_expansion_factor, bias, LayerNorm_type) 
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-1)
@@ -308,13 +318,14 @@ class MetaRawFormer(nn.Module):
         #])
         
         self.middle_block = nn.ModuleList([
-            TransformerBlock(int(dim*2**(layers-1)), heads[layers-1], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
+            TransformerBlock(int(dim*2**(layers-1)), heads[layers-1], ffn_expansion_factor, bias, LayerNorm_type) 
             for _ in range(num_blocks[layers-1])
         ])
         
         self.decoders = nn.ModuleList([
             nn.ModuleList([
-                TransformerBlock(int(dim*2**i), heads[i], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
+                #TransformerBlock(int(dim*2**i), heads[i], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
+                MetaTransformerBlock(int(dim*2**i), heads[i], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-2, -1, -1)
@@ -326,7 +337,8 @@ class MetaRawFormer(nn.Module):
         #])
         
         self.last_decoder = nn.ModuleList([
-            TransformerBlock(int(dim*2**1), heads[0], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
+            #TransformerBlock(int(dim*2**1), heads[0], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
+            MetaTransformerBlock(int(dim*2**1), heads[0], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
             for _ in range(num_blocks[0])
         ])
         
@@ -347,7 +359,8 @@ class MetaRawFormer(nn.Module):
             for i in range (layers-2, -1, -1)
         ])
         self.refinement = nn.ModuleList([
-            TransformerBlock(dim*2**1, heads[0], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
+            #TransformerBlock(dim*2**1, heads[0], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
+            MetaTransformerBlock(dim*2**1, heads[0], num_meta_keys, meta_embedding_dims, ffn_expansion_factor, bias, LayerNorm_type) 
             for i in range(num_refinement_blocks)
         ])
         self.output = nn.Sequential(
@@ -374,13 +387,13 @@ class MetaRawFormer(nn.Module):
         encode_features = []
         for encodes, down in zip(self.encoders, self.downs):
             for encode in encodes:
-                x = encode(x, metainfo)
+                x = encode(x)
             #x = meta_inject(x, metainfo)
             encode_features.append(x)
             x = down(x)
         
         for block in self.middle_block:
-            x = block(x, metainfo)
+            x = block(x)
         
         encode_features.reverse()
         for up, fuse, feature, decodes in zip(self.ups[:-1], self.fuses, encode_features[:-1], self.decoders):
@@ -434,13 +447,13 @@ def cal_model_complexity(model, x, metainfo):
     print(f"Params: {params / 1e6} M")
 
 if __name__ == '__main__':
-    model = MetaRawFormer(in_channels=4, out_channels=4, dim=32, layers=4,
+    model = MetaRawFormer(in_channels=4, out_channels=4, dim=48, layers=4,
                         num_meta_keys=4, meta_embedding_dims=384,
-                        num_blocks=[2, 2, 2, 4], heads=[1, 2, 4, 8]).cuda()
+                        num_blocks=[4,6,6,8], num_refinement_blocks=4, heads=[1, 2, 4, 8]).cuda()
     #idx_list = [1,2,3,4,2]
     #metainfoidx = torch.tensor(idx_list, dtype=torch.long).unsqueeze(0).cuda()
     metainfo = torch.rand((1,4,1)).cuda()
-    x = torch.rand(1,4,512,512).cuda()
+    x = torch.rand(1,4,256,256).cuda()
     cal_model_complexity(model, x, metainfo)
     exit(0)
     import time
@@ -448,8 +461,3 @@ if __name__ == '__main__':
     x = model(x)
     end = time.time()
     print(f'Time comsumed: {end-begin} s')
-
-'''
-FLOPs: 170.409429472 G
-Params: 9.024678 M
-'''

@@ -25,48 +25,55 @@ def test(model, dataloader, camera, ratio, merge_test=False, num_patch=None, wit
             input_path = data['input_path'][0]
             gt_path = data['gt_path'][0]
             if with_metainfo:
-                input_metainfoidx = data['input_metainfoidx'].cuda()
+                input_metainfoidx = data['input_metainfo'].cuda()
             if merge_test:
                 assert num_patch in [-1, 2, 4]
                 if num_patch == -1:
                     patch_size = config['test'].get('patch_size', None)
                     assert patch_size is not None
                     inputs = auto_crop(input)
+                    gts = auto_crop(gt)
                     if with_metainfo:
-                        pres = [model(input_patch, input_metainfoidx) for input_patch in inputs]
+                        preds = [model(input_patch, input_metainfoidx) for input_patch in inputs]
                     else:
-                        pres = [model(input_patch) for input_patch in inputs]
-                    h, w = input.shape[2:]
-                    num_row_patch, num_col_patch = w // patch_size, h // patch_size
-                    pred = auto_reconstruct(pres, num_row_patch=num_row_patch, num_col_patch=num_col_patch, patch_size=patch_size)
+                        preds = [model(input_patch) for input_patch in inputs]
+                    #h, w = input.shape[2:]
+                    #num_row_patch, num_col_patch = w // patch_size, h // patch_size
+                    #pred = auto_reconstruct(pres, num_row_patch=num_row_patch, num_col_patch=num_col_patch, patch_size=patch_size)
 
                 elif num_patch == 2:
                     inputs = crop_tow_patch(input)
+                    gts = crop_tow_patch(gt)
                     if with_metainfo:
                         preds = [model(patch, input_metainfoidx) for patch in inputs]
                     else:
                         preds = [model(patch) for patch in inputs]
-                    pred = torch.cat(preds, dim=3)
+                    #pred = torch.cat(preds, dim=3)
 
                 elif num_patch == 4:
                     inputs = crop_four_patch(input)
+                    gts = crop_four_patch(gt)
                     if with_metainfo:
                         preds = [model(patch, input_metainfoidx) for patch in inputs]
                     else:
                         preds = [model(patch) for patch in inputs]
-                    x_top = torch.cat(preds[:2], dim=3)
-                    x_bottom = torch.cat(preds[2:], dim=3)
-                    pred = torch.cat([x_top, x_bottom], dim=2)
+                    #x_top = torch.cat(preds[:2], dim=3)
+                    #x_bottom = torch.cat(preds[2:], dim=3)
+                    #pred = torch.cat([x_top, x_bottom], dim=2)
+                preds = [torch.clamp(pred, 0, 1) for pred in preds]
+                psnrs = [get_psnr_torch(pred, gt, data_range=1.0) for (pred, gt) in zip(preds, gts)]
+                ssims = [get_ssim_torch(pred, gt, data_range=1.0) for (pred, gt) in zip(preds, gts)]
+                psnr = sum(psnrs) / len(psnrs)
+                ssim = sum(ssims) / len(ssims)
             else:
                 if with_metainfo:
                     pred = model(input, input_metainfoidx)
                 else:
                     pred = model(input)
 
-            pred = torch.clamp(pred, 0, 1)
-
-            psnr = get_psnr_torch(pred, gt, data_range=1.0)
-            ssim = get_ssim_torch(pred, gt, data_range=1.0)
+                pred = torch.clamp(pred, 0, 1)
+                psnr = get_psnr_torch(pred, gt, data_range=1.0)
+                ssim = get_ssim_torch(pred, gt, data_range=1.0)
 
             f.write(f"input:{input_path}    gt:{gt_path}    psnr:{psnr.item():.4f}   ssim:{ssim.item():.4f}\n")
 
@@ -84,12 +91,12 @@ def test(model, dataloader, camera, ratio, merge_test=False, num_patch=None, wit
 
 if __name__ == "__main__":
     os.makedirs('results/ELD', exist_ok=True)
-    #datadir='/root/autodl-tmp/datasets/ELD/'
-    datadir='/data/dataset/Carlos/ELD' #30
+    datadir='/root/autodl-tmp/datasets/ELD/'
+    #datadir='/data/dataset/Carlos/ELD' #30
     parser = argparse.ArgumentParser()
     parser.add_argument('--with_metainfo', action='store_true', default=False)
     parser.add_argument('--merge_test', action='store_true', default=False)
-    parser.add_argument('--num_patch', type=int, default=None)
+    #parser.add_argument('--num_patch', type=int, default=None)
     args = parser.parse_args()
     
     with open('configs/sony.yaml', 'r') as file:
@@ -97,15 +104,16 @@ if __name__ == "__main__":
     set_random_seed(config['manual_seed'])
     model_name, model = build_model(config['model'])
     model = model.cuda()
-    #checkpoint = torch.load('/root/autodl-tmp/Generalization/runs/SONY/checkpoints/best_model.pth')
-    checkpoint = torch.load('/data/model/Carlos/RAWDenoising/runs/SONY/checkpoints/best_model.pth') #30
+    checkpoint = torch.load('/root/autodl-tmp/MetaRawDenoising/runs/SONY/checkpoints/best_model.pth') 
+    #checkpoint = torch.load('/data/model/Carlos/RAWDenoising/runs/SONY/checkpoints/best_model.pth') #30
     model.load_state_dict(checkpoint['model'])
 
     cameras = ['SonyA7S2', 'NikonD850', 'CanonEOS70D', 'CanonEOS700D']
     #cameras = ['NikonD850', 'CanonEOS70D', 'CanonEOS700D']
+    num_patches = [2, 4, 4, 4]
     #ratios = [1, 10, 100, 200]
     ratios = [100, 200]
-    for camera in cameras:
+    for camera, num_patch in zip(cameras, num_patches):
         total_psnr = 0.0
         total_ssim = 0.0
         total_samples = 0
@@ -113,9 +121,9 @@ if __name__ == "__main__":
             pairs_file_path = os.path.join(datadir, f'{camera}_{ratio}.txt')
             dataset = ELDDataset(datadir=datadir, camera=camera, pairs_file_path=pairs_file_path,patch_size=None)
             dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=16, pin_memory=True)
-            psrn, ssim, samples = test(model, dataloader, camera=camera, ratio=ratio, 
-                                    merge_test=args.merge_test, num_patch=args.num_patch, with_metainfo=args.with_metainfo)
-            total_psnr += psrn
+            psnr, ssim, samples = test(model, dataloader, camera=camera, ratio=ratio, 
+                                    merge_test=args.merge_test, num_patch=num_patch, with_metainfo=args.with_metainfo)
+            total_psnr += psnr
             total_ssim += ssim
             total_samples += samples
         all_ratio_avg_psnr, all_ratio_avg_ssim = total_psnr / total_samples, total_ssim / total_samples

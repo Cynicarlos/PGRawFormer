@@ -1,15 +1,15 @@
 import numpy as np
 import torch
 
-def crop_tow_patch(input_raw):
-    _, _, H, W = input_raw.shape
-    input_raws = [input_raw[:, :, :, :W//2], input_raw[:, :, :, W//2:]]
-    return input_raws
+def crop_tow_patch(x):
+    _, _, H, W = x.shape
+    res = [x[:, :, :, :W//2], x[:, :, :, W//2:]]
+    return res
 
-def crop_four_patch(input_raw):
-    _, _, H, W = input_raw.shape
-    input_raws = [input_raw[:, :, :H//2, :W//2], input_raw[:, :, :H//2, W//2:], input_raw[:, :, H//2:, :W//2], input_raw[:, :, H//2:, W//2:]]
-    return input_raws
+def crop_four_patch(x):
+    _, _, H, W = x.shape
+    res = [x[:, :, :H//2, :W//2], x[:, :, :H//2, W//2:], x[:, :, H//2:, :W//2], x[:, :, H//2:, W//2:]]
+    return res
 
 def auto_crop(input_raw, num_row_patch, num_col_patch):
     _, _, H, W = input_raw.shape

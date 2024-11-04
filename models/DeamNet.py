@@ -306,9 +306,9 @@ class DeamNet(nn.Module):
 
 
 '''
-FLOPs: 583.670956032 G
+FLOPs: 145.917739008 G
 Params: 1.876772 M
-Time comsumed: 0.06617951393127441 s
+Time comsumed: 0.027121543884277344 s
 '''
 def cal_model_complexity(model, x):
     import thop
@@ -318,9 +318,7 @@ def cal_model_complexity(model, x):
 
 if __name__ == '__main__':
     model = DeamNet(Isreal=True).cuda()
-    x = torch.rand(1,4,512,512).cuda()
-    #x = torch.rand(1,4,1424,2128).cuda()
-    #x = torch.rand(1,4,712,1064).cuda()
+    x = torch.rand(1,4,256,256).cuda()
     trainable_num = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Params: {trainable_num / 1e6} M")
     cal_model_complexity(model, x)

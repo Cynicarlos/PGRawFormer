@@ -53,7 +53,7 @@ class SIDSonyDataset(data.Dataset):
         #self.Fnumber_table = [16/5, 4, 9/2, 5, 28/5, 63/10, 71/10, 8, 9, 10, 11, 13, 14, 16, 18, 22]
         #self.FocalLength_table = [21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 38, 39, 41, 42, 44,  45, 46, 47, 48, 49, 50, 53, 54, 57, 59, 61, 63,66, 67, 73, 78, 82, 83, 87, 89, 90, 120, 128, 139, 166, 181, 223]
         self.keys_min_max=[[1/3200, 30],[50, 25600],[16/5, 22],[21, 223]]
-        assert len(self.keys) == len(self.keys_min_max)
+        #assert len(self.keys) == len(self.keys_min_max)
         #self.dicts = {
         #    'ExposureTime': self.ExposureTime_table,
         #    'ISOSpeedRating': self.ISOSpeedRating_table,
