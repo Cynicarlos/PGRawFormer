@@ -26,7 +26,7 @@ def test(model, dataloader, ratio, merge_test=False, num_patch=None, with_metain
             input_path = data['input_path'][0]
             gt_path = data['gt_path'][0]
             if with_metainfo:
-                input_metainfoidx = data['input_metainfo'].cuda()
+                input_metainfo = data['input_metainfo'].cuda()
                 
             if merge_test:
                 assert num_patch is not None
@@ -36,32 +36,27 @@ def test(model, dataloader, ratio, merge_test=False, num_patch=None, with_metain
                     inputs = auto_crop(input)
                     gts = auto_crop(gt)
                     if with_metainfo:
-                        preds = [model(input_patch, input_metainfoidx) for input_patch in inputs]
+                        preds = [model(input_patch, input_metainfo) for input_patch in inputs]
                     else:
                         preds = [model(input_patch) for input_patch in inputs]
-                    #h, w = input.shape[2:]
-                    #num_row_patch, num_col_patch = w // patch_size, h // patch_size
-                    #pred = auto_reconstruct(pres, num_row_patch=num_row_patch, num_col_patch=num_col_patch, patch_size=patch_size)
 
                 elif num_patch == 2:
                     inputs = crop_tow_patch(input)
                     gts = crop_tow_patch(gt)
                     if with_metainfo:
-                        preds = [model(patch, input_metainfoidx) for patch in inputs]
+                        preds = [model(patch, input_metainfo) for patch in inputs]
                     else:
                         preds = [model(patch) for patch in inputs]
-                    #pred = torch.cat(preds, dim=3)
+
 
                 elif num_patch == 4:
                     inputs = crop_four_patch(input)
                     gts = crop_four_patch(gt)
                     if with_metainfo:
-                        preds = [model(patch, input_metainfoidx) for patch in inputs]
+                        preds = [model(patch, input_metainfo) for patch in inputs]
                     else:
                         preds = [model(patch) for patch in inputs]
-                    #x_top = torch.cat(preds[:2], dim=3)
-                    #x_bottom = torch.cat(preds[2:], dim=3)
-                    #pred = torch.cat([x_top, x_bottom], dim=2)
+
                 preds = [torch.clamp(pred, 0, 1) for pred in preds]
                 psnrs = [get_psnr_torch(pred, gt, data_range=1.0) for (pred, gt) in zip(preds, gts)]
                 ssims = [get_ssim_torch(pred, gt, data_range=1.0) for (pred, gt) in zip(preds, gts)]
@@ -69,7 +64,7 @@ def test(model, dataloader, ratio, merge_test=False, num_patch=None, with_metain
                 ssim = sum(ssims) / len(ssims)
             else:
                 if with_metainfo:
-                    pred = model(input, input_metainfoidx)
+                    pred = model(input, input_metainfo)
                 else:
                     pred = model(input)
                 pred = torch.clamp(pred, 0, 1)

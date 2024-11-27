@@ -75,8 +75,8 @@ def train_one_epoch(config, model, critierion, data_loader, optimizer, epoch, lr
         input_raw = data['input_raw'].cuda(non_blocking=True)
         gt_raw = data['gt_raw'].cuda(non_blocking=True)
         if with_metainfo:
-            metainfoidx = data['input_metainfoidx'].cuda(non_blocking=True)
-            pred = model(input_raw, metainfoidx)#pred_raw
+            input_metainfo = data['input_metainfo'].cuda(non_blocking=True)
+            pred = model(input_raw, input_metainfo)#pred_raw
         else:
             pred = model(input_raw)#pred_raw
 
@@ -126,8 +126,7 @@ def validate(config, model, data_loader, epoch, writer, with_metainfo=False):
         gt_raw = data['gt_raw'].cuda(non_blocking=True)
         
         if with_metainfo:
-            metainfoidx = data['input_metainfoidx'].cuda(non_blocking=True)
-
+            input_metainfo = data['input_metainfo'].cuda(non_blocking=True)
         
         if config['test']['merge_test']:
             assert config['test']['num_patch'] is not None
@@ -135,40 +134,42 @@ def validate(config, model, data_loader, epoch, writer, with_metainfo=False):
 
             if config['test']['num_patch'] == -1:
                 assert patch_size is not None
-                input_raws = auto_crop(input_raw)
+                inputs = auto_crop(input_raw)
+                gts = auto_crop(gt_raw)
                 if with_metainfo:
-                    pres = [model(input_patch, metainfoidx) for input_patch in input_raws]
+                    pres = [model(input_patch, input_metainfo) for input_patch in inputs]
                 else:
-                    pres = [model(input_patch) for input_patch in input_raws]
-                h, w = input_raw.shape[2:]
-                num_row_patch, num_col_patch = w // patch_size, h // patch_size
-                pred = auto_reconstruct(pres, num_row_patch=num_row_patch, num_col_patch=num_col_patch, patch_size=patch_size)
+                    pres = [model(input_patch) for input_patch in inputs]
 
             elif config['test']['num_patch'] == 2:
-                input_raws = crop_tow_patch(input_raw)
+                inputs = crop_tow_patch(input_raw)
+                gts = crop_tow_patch(gt_raw)
                 if with_metainfo:
-                    preds = [model(patch, metainfoidx) for patch in input_raws]
+                    preds = [model(patch, input_metainfo) for patch in inputs]
                 else:
-                    preds = [model(patch) for patch in input_raws]
-                pred = torch.cat(preds, dim=3)
+                    preds = [model(patch) for patch in inputs]
 
             elif config['test']['num_patch'] == 4:
-                input_raws = crop_four_patch(input_raw)
+                inputs = crop_four_patch(input_raw)
+                gts = crop_four_patch(gt_raw)
                 if with_metainfo:
-                    preds = [model(patch, metainfoidx) for patch in input_raws]
+                    preds = [model(patch, input_metainfo) for patch in inputs]
                 else:
-                    preds = [model(patch) for patch in input_raws]
-                x_top = torch.cat(preds[:2], dim=3)
-                x_bottom = torch.cat(preds[2:], dim=3)
-                pred = torch.cat([x_top, x_bottom], dim=2)
+                    preds = [model(patch) for patch in inputs]
 
+            preds = [torch.clamp(pred, 0, 1) for pred in preds]
+            psnrs = [get_psnr_torch(pred, gt, data_range=1.0) for (pred, gt) in zip(preds, gts)]
+            ssims = [get_ssim_torch(pred, gt, data_range=1.0) for (pred, gt) in zip(preds, gts)]
+            psnr = sum(psnrs) / len(psnrs)
+            ssim = sum(ssims) / len(ssims)
         else:
             if with_metainfo:
-                pred = model(input_raw, metainfoidx)
+                pred = model(input_raw, input_metainfo)
             else:
                 pred = model(input_raw)
-
-        psnr, ssim = validate_metric(pred, gt_raw)
+            pred = torch.clamp(pred, 0, 1)
+            psnr = get_psnr_torch(pred, gt_raw, data_range=1.0)
+            ssim = get_ssim_torch(pred, gt_raw, data_range=1.0)
 
 
         batch_size = config['data']['test']['batch_size']

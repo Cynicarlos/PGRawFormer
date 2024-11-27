@@ -233,7 +233,7 @@ class Inverse_transform_function(nn.Module):
         x = self.pre(x)+x
         x = self.ext(x)
         return x
-    
+
 import sys
 sys.path.append('/root/autodl-tmp/Generalization')
 from utils.registry import MODEL_REGISTRY

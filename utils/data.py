@@ -11,6 +11,11 @@ def crop_four_patch(x):
     res = [x[:, :, :H//2, :W//2], x[:, :, :H//2, W//2:], x[:, :, H//2:, :W//2], x[:, :, H//2:, W//2:]]
     return res
 
+def crop_six_patch(input_raw):
+    _, _, H, W = input_raw.shape
+    input_raws = [input_raw[:, :, :H//2, :W//3], input_raw[:, :, :H//2, W//3 : 2*W//3], input_raw[:, :, :H//2, 2*W//3:], input_raw[:, :, H//2:, :W//3], input_raw[:, :, H//2:, W//3 : 2*W//3], input_raw[:, :, H//2:, 2*W//3:]]
+    return input_raws
+
 def auto_crop(input_raw, num_row_patch, num_col_patch):
     _, _, H, W = input_raw.shape
     patch_size = patch_size

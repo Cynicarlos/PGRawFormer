@@ -233,52 +233,19 @@ from utils.registry import MODEL_REGISTRY
 class UNet(nn.Module):
     def __init__(self, in_channels, base_channels, embedding_dim=32):
         super(UNet, self).__init__()
-        self.ExposureTime_dict=[
-            None, '1/3200', '1/2000', '1/1600', '1/1000', '1/800', '1/500', '1/400', '1/250', 
-            '1/200', '1/160', '1/100', '1/80', '1/50', '1/40','1/30','1/25', '1/20', '1/15', 
-            '1/10', '1/8', '1/5', '1/4', '2/5', '1/2', '2', '16/5', '4',  '10', '30'
-        ]
-        self.Fnumber_dict = [None, '16/5', '4', '9/2', '5', '28/5', '63/10', '71/10', '8', '9', '10', '11', '13', '14', '16', '18', '22']
-        self.FocalLength_dict = [
-            None, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 38, 
-            39, 41, 42, 44,  45, 46, 47, 48, 49, 50, 53, 54, 57, 59, 61, 63,
-            66, 67, 73, 78, 82, 83, 87, 89, 90, 120, 128, 139, 166, 181, 223]
-        self.ISOSpeedRating_dict = [None, 50, 64, 80, 100, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 
-                              1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800, 16000, 25600]
-        self.MeteringMode_dict = [None, 'CenterWeightedAverage', 'Pattern']
-        self.dicts = {
-            'ExposureTime': self.ExposureTime_dict,
-            'Fnumber': self.Fnumber_dict,
-            'FocalLength': self.FocalLength_dict,
-            'ISOSpeedRating': self.ISOSpeedRating_dict,
-            'MeteringMode': self.MeteringMode_dict
-        }
-        self.dicts_keys = list(self.dicts.keys()) #['ExposureTime','Fnumber','FocalLength','ISOSpeedRating','MeteringMode']
-        self.embedding_layers = nn.ModuleDict({
-            key: nn.Embedding(len(dict_), embedding_dim)
-            for key, dict_ in self.dicts.items()
-        })
-        self.encode_mifs = nn.ModuleList([
-            MIF(feature_dim=base_channels*(2**i), embedding_dim=embedding_dim, num_heads=2**i)
-            for i in range(4)
-        ])
         
-        self.decode_mifs = nn.ModuleList([
-            MIF(feature_dim=base_channels*(2**i), embedding_dim=embedding_dim, num_heads=2**i)
-            for i in range(2, -1, -1)
-        ])
-
         self.conv_in = nn.Sequential(
             nn.Conv2d(in_channels, base_channels, 3, padding=1),
             nn.GELU(),
             nn.Conv2d(base_channels, base_channels, 3, padding=1),
             nn.GELU()
         )
-        
+
         self.encode_convs = nn.ModuleList([
             DNTree(base_channels*(2**i))
             for i in range(4)
         ])
+        
         self.downs = nn.ModuleList([
             nn.Conv2d(base_channels*(2**i), base_channels*(2**(i+1)), kernel_size=2, stride=2)
             for i in range(3)
