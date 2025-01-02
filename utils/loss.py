@@ -73,6 +73,8 @@ class Losses(nn.Module):
                 self.module_list.append(CharbonnierLoss())
             elif loss_type == 'Edge':
                 self.module_list.append(EdgeLoss())
+            elif loss_type == 'LightAware':
+                self.module_list.append(LightAwareLoss())
 
     def __len__(self):
         return len(self.types)

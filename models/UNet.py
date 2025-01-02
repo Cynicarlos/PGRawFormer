@@ -1,307 +1,114 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import sys
-sys.path.append('/root/autodl-tmp/Generalization')
-
-class ChannelAttention(nn.Module):
-    def __init__(self, num_feat, squeeze_factor=16):
-        super(ChannelAttention, self).__init__()
-        self.attention = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(num_feat, num_feat // squeeze_factor, 1, padding=0),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(num_feat // squeeze_factor, num_feat, 1, padding=0),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, x):
-        y = self.attention(x)
-        return x * y
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        
-        # 平均池化和最大池化，用于获取全局信息
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-        # 7x7卷积捕捉空间信息
-        self.spatial_conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2, bias=False)
-        
-        # Sigmoid激活函数
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        # 获取输入的维度信息
-        b, c, h, w = x.size()
-        
-        # 沿通道维度获取全局平均池化和最大池化
-        avg_out = torch.mean(x, dim=1, keepdim=True)  # (b, 1, h, w)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)  # (b, 1, h, w)
-        
-        # 将平均池化和最大池化结果进行拼接
-        pool_out = torch.cat([avg_out, max_out], dim=1)  # (b, 2, h, w)
-        
-        # 使用7x7卷积提取空间特征
-        spatial_attn = self.spatial_conv(pool_out)  # (b, 1, h, w)
-        
-        # 使用Sigmoid激活函数生成空间注意力权重
-        attn_weights = self.sigmoid(spatial_attn)  # (b, 1, h, w)
-        
-        # 将空间注意力权重扩展为与输入相同的形状
-        attn_weights = attn_weights.expand(b, c, h, w)  # (b, c, h, w)
-        
-        # 将输入特征与空间注意力权重相乘
-        output = x * attn_weights  # (b, c, h, w)
-        
-        return output
-
-class LayerNorm(nn.Module):
-    r"""LayerNorm that supports two data formats: channels_last (default) or channels_first.
-    The ordering of the dimensions in the inputs. channels_last corresponds to inputs with
-    shape (batch_size, height, width, channels) while channels_first corresponds to inputs
-    with shape (batch_size, channels, height, width).
-    """
-
-    def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(normalized_shape))
-        self.bias = nn.Parameter(torch.zeros(normalized_shape))
-        self.eps = eps
-        self.data_format = data_format
-        if self.data_format not in ["channels_last", "channels_first"]:
-            raise NotImplementedError
-        self.normalized_shape = (normalized_shape,)
-
-    def forward(self, x):
-        if self.data_format == "channels_last":
-            return F.layer_norm(
-                x, self.normalized_shape, self.weight, self.bias, self.eps
-            )
-        elif self.data_format == "channels_first":
-            u = x.mean(1, keepdim=True)
-            s = (x - u).pow(2).mean(1, keepdim=True)
-            x = (x - u) / torch.sqrt(s + self.eps)
-            x = self.weight[:, None, None] * x + self.bias[:, None, None]
-            return x
-
-class SimpleFuse(nn.Module):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, 3, padding=1, groups=in_channels),
-            nn.Conv2d(in_channels, in_channels, 1),
-            nn.GELU()
-        )
-        self.convs = nn.Sequential(
-            nn.Conv2d(2*in_channels, 2*in_channels, 3, padding=1, groups=2*in_channels),
-            ChannelAttention(num_feat=2*in_channels),
-            nn.Conv2d(2*in_channels, in_channels, 1)     
-        )
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, 1),
-            nn.GELU()
-        )
-        self.out = nn.Conv2d(in_channels, in_channels, 1)
-    def forward(self, cur, pre):
-        x = torch.cat([cur, pre], dim=1)
-        pre = self.conv1(pre) #c
-        x = self.convs(x) * pre
-        x = self.conv2(x) + cur
-        x = self.out(x)
-        return x
-
-class MIF(nn.Module):
-    def __init__(self, feature_dim, embedding_dim=32, num_heads=8):
-        super(MIF, self).__init__()
-        self.num_heads = num_heads
-        self.head_dim = feature_dim // num_heads
-        self.feature_dim = feature_dim
-        
-        self.ln0 = LayerNorm(feature_dim, data_format="channels_first")
-        self.ln1 = LayerNorm(feature_dim, data_format="channels_first")
-        self.query = nn.Linear(embedding_dim, feature_dim)
-        self.key = nn.Linear(feature_dim, feature_dim)
-        self.value = nn.Linear(feature_dim, feature_dim)
-        
-        # 为每个头自适应地学习一个权重
-        self.head_weights = nn.Parameter(torch.ones(num_heads))
-        
-        self.out_proj = nn.Linear(feature_dim, feature_dim)
-
-    def forward(self, x, embeddings):
-        b, c, h, w = x.shape
-        x  = self.ln0(x) #(b,c,h,w)
-        x_flat = x.permute(0, 2, 3, 1).reshape(b, h * w, c)
-
-        Q = self.query(embeddings).view(b, 5, self.num_heads, self.head_dim)  # (b, 5, num_heads, head_dim)
-        K = self.key(x_flat).view(b, h * w, self.num_heads, self.head_dim)  # (b, h*w, num_heads, head_dim)
-        V = self.value(x_flat).view(b, h * w, self.num_heads, self.head_dim)  # (b, h*w, num_heads, head_dim)
-
-        Q = Q.permute(0, 2, 1, 3)  # (b, num_heads, 5, head_dim)
-        K = K.permute(0, 2, 3, 1)  # (b, num_heads, head_dim, h*w)
-        V = V.permute(0, 2, 1, 3)  # (b, num_heads, h*w, head_dim)
-
-        # 计算注意力权重
-        attn_weights = torch.matmul(Q, K) / (self.head_dim ** 0.5)  # (b, num_heads, 5, h*w)
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-
-        # 自适应调整每个头的权重
-        adaptive_weights = torch.softmax(self.head_weights, dim=0).unsqueeze(0).unsqueeze(2).unsqueeze(3)
-        attn_output = torch.matmul(attn_weights, V) * adaptive_weights  # (b, num_heads, 5, head_dim)
-
-        attn_output = attn_output.permute(0, 2, 1, 3).contiguous().view(b, 5, self.feature_dim)  # (b, 5, feature_dim)
-
-        attn_output = self.out_proj(attn_output)  # (b, 5, feature_dim)
-
-        attn_output = attn_output.permute(0, 2, 1).unsqueeze(3).unsqueeze(4)  # (b, feature_dim, 5, 1, 1)
-        attn_output = attn_output.expand(-1, -1, -1, h, w)  # (b, feature_dim, 5, h, w)
-
-        attn_output = attn_output.mean(dim=2)  # (b, feature_dim, h, w)
-        attn_output = self.ln1(attn_output)
-        return x + attn_output  # 融合输入与注意力输出
-
-class DNTree(nn.Module):
-    def __init__(self, in_channels) -> None:
-        super().__init__()
-        self.left_conv = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, 1),
-            nn.GELU()
-        )
-        self.right_conv = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, 1),
-            nn.GELU()
-        )
-        self.left_ca = ChannelAttention(num_feat=in_channels)
-        self.left_sa = SpatialAttention(kernel_size=7)
-        
-        self.right_ca = ChannelAttention(num_feat=in_channels)
-        self.right_sa = SpatialAttention(kernel_size=7)
-        
-        self.in_branch_conv1 = nn.Sequential(
-            nn.Conv2d(2*in_channels, in_channels, 3, padding=1, groups=in_channels),
-            nn.GELU(),
-            nn.Conv2d(in_channels, in_channels, 1),
-            nn.GELU(),
-        )
-        self.in_branch_conv2 = nn.Sequential(
-            nn.Conv2d(2*in_channels, in_channels, 3, padding=1, groups=in_channels),
-            nn.GELU(),
-            nn.Conv2d(in_channels, in_channels, 1),
-            nn.GELU(),
-        )
-        
-        self.cross_branch_conv1 = nn.Sequential(
-            nn.Conv2d(2*in_channels, in_channels, 3, padding=1, groups=in_channels),
-            nn.GELU(),
-            nn.Conv2d(in_channels, in_channels, 1),
-            nn.GELU(),
-        )
-        self.cross_branch_conv2 = nn.Sequential(
-            nn.Conv2d(2*in_channels, in_channels, 3, padding=1, groups=in_channels),
-            nn.GELU(),
-            nn.Conv2d(in_channels, in_channels, 1),
-            nn.GELU(),
-        )
-        
-        self.ca = ChannelAttention(2*in_channels)
-        self.conv_out = nn.Sequential(
-            nn.Conv2d(2*in_channels, in_channels, 3, padding=1),
-            nn.GELU()
-        )
-        
-    def forward(self, x):
-        shortcut = x
-        l = self.left_conv(x)
-        r = self.right_conv(x)
-        in1 = torch.cat([self.left_ca(l), self.left_sa(l)], dim=1)
-        in2 = torch.cat([self.right_ca(r), self.right_sa(r)], dim=1)
-        cross1 = torch.cat([self.left_ca(l), self.right_sa(r)], dim=1)
-        cross2 = torch.cat([self.left_sa(l), self.right_ca(r)], dim=1)
-        l = self.in_branch_conv1(in1) + self.in_branch_conv2(in2)
-        r = self.cross_branch_conv1(cross1) + self.cross_branch_conv2(cross2)
-        x = torch.cat([l,r],dim=1)
-        x = self.ca(x)
-        x = self.conv_out(x)
-        x = x + shortcut
-        return x
 
 from utils.registry import MODEL_REGISTRY
 @MODEL_REGISTRY.register()
 class UNet(nn.Module):
-    def __init__(self, in_channels, base_channels, embedding_dim=32):
+    def __init__(self, in_channels=4, out_channels=3):
         super(UNet, self).__init__()
         
-        self.conv_in = nn.Sequential(
-            nn.Conv2d(in_channels, base_channels, 3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(base_channels, base_channels, 3, padding=1),
-            nn.GELU()
-        )
-
-        self.encode_convs = nn.ModuleList([
-            DNTree(base_channels*(2**i))
-            for i in range(4)
-        ])
+        #device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        self.conv1_1 = nn.Conv2d(in_channels, 32, kernel_size=3, stride=1, padding=1)
+        self.conv1_2 = nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1)
+        self.pool1 = nn.MaxPool2d(kernel_size=2)
         
-        self.downs = nn.ModuleList([
-            nn.Conv2d(base_channels*(2**i), base_channels*(2**(i+1)), kernel_size=2, stride=2)
-            for i in range(3)
-        ])
-        self.decode_convs = nn.ModuleList([
-            DNTree(base_channels*(2**i))
-            for i in range(2, -1, -1)
-        ])
-        self.ups = nn.ModuleList([
-            nn.ConvTranspose2d(base_channels*(2**(i+1)), base_channels*(2**i), kernel_size=2, stride=2)
-            for i in range(2, -1, -1)
-        ])
-        self.simplefuses = nn.ModuleList([
-            SimpleFuse(in_channels=base_channels*(2**i))
-            for i in range(2, -1, -1)
-        ])
+        self.conv2_1 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv2_2 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
+        self.pool2 = nn.MaxPool2d(kernel_size=2)
         
-        self.conv_out = nn.Sequential(
-            nn.Conv2d(base_channels, in_channels, 3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(in_channels, in_channels, 3, padding=1),
-            nn.GELU(),
-        )
-
-    def forward(self, x, metaInfoIdx):
+        self.conv3_1 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
+        self.conv3_2 = nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)
+        self.pool3 = nn.MaxPool2d(kernel_size=2)
+        
+        self.conv4_1 = nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1)
+        self.conv4_2 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
+        self.pool4 = nn.MaxPool2d(kernel_size=2)
+        
+        self.conv5_1 = nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1)
+        self.conv5_2 = nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1)
+        
+        self.upv6 = nn.ConvTranspose2d(512, 256, 2, stride=2)
+        self.conv6_1 = nn.Conv2d(512, 256, kernel_size=3, stride=1, padding=1)
+        self.conv6_2 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
+        
+        self.upv7 = nn.ConvTranspose2d(256, 128, 2, stride=2)
+        self.conv7_1 = nn.Conv2d(256, 128, kernel_size=3, stride=1, padding=1)
+        self.conv7_2 = nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)
+        
+        self.upv8 = nn.ConvTranspose2d(128, 64, 2, stride=2)
+        self.conv8_1 = nn.Conv2d(128, 64, kernel_size=3, stride=1, padding=1)
+        self.conv8_2 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
+        
+        self.upv9 = nn.ConvTranspose2d(64, 32, 2, stride=2)
+        self.conv9_1 = nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1)
+        self.conv9_2 = nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1)
+        
+        self.conv10_1 = nn.Conv2d(32, out_channels, kernel_size=1, stride=1)
+    
+    def forward(self, x):
         x = self._check_and_padding(x)
-        embeddings = []
-        for i, key in enumerate(self.dicts_keys):
-            embedding = self.embedding_layers[key](metaInfoIdx[:, i])
-            embeddings.append(embedding)
-        embeddings = torch.cat(embeddings, dim=1)
+        conv1 = self.lrelu(self.conv1_1(x))
+        conv1 = self.lrelu(self.conv1_2(conv1))
+        pool1 = self.pool1(conv1)
         
-        x = self.conv_in(x) #c
-        encoder_features = []
-        for mif, encode, down in zip(self.encode_mifs[:-1], self.encode_convs[:-1], self.downs):
-            x = mif(x, embeddings)
-            x = encode(x)
-            encoder_features.append(x)
-            x = down(x)
-        x = self.encode_mifs[-1](x, embeddings)
-        x = self.encode_convs[-1](x)
+        conv2 = self.lrelu(self.conv2_1(pool1))
+        conv2 = self.lrelu(self.conv2_2(conv2))
+        pool2 = self.pool1(conv2)
         
-        encoder_features.reverse()
-        for up, fuse, feature, mif, decode in zip(self.ups, self.simplefuses, encoder_features, self.decode_mifs, self.decode_convs):
-            x = up(x)
-            x = fuse(x, feature)
-            x = mif(x, embeddings)
-            x = decode(x)
-        x = self.conv_out(x)
-        x = self._check_and_crop(x)
+        conv3 = self.lrelu(self.conv3_1(pool2))
+        conv3 = self.lrelu(self.conv3_2(conv3))
+        pool3 = self.pool1(conv3)
+        
+        conv4 = self.lrelu(self.conv4_1(pool3))
+        conv4 = self.lrelu(self.conv4_2(conv4))
+        pool4 = self.pool1(conv4)
+        
+        conv5 = self.lrelu(self.conv5_1(pool4))
+        conv5 = self.lrelu(self.conv5_2(conv5))
+        
+        up6 = self.upv6(conv5)
+        up6 = torch.cat([up6, conv4], 1)
+        conv6 = self.lrelu(self.conv6_1(up6))
+        conv6 = self.lrelu(self.conv6_2(conv6))
+        
+        up7 = self.upv7(conv6)
+        up7 = torch.cat([up7, conv3], 1)
+        conv7 = self.lrelu(self.conv7_1(up7))
+        conv7 = self.lrelu(self.conv7_2(conv7))
+        
+        up8 = self.upv8(conv7)
+        up8 = torch.cat([up8, conv2], 1)
+        conv8 = self.lrelu(self.conv8_1(up8))
+        conv8 = self.lrelu(self.conv8_2(conv8))
+        
+        up9 = self.upv9(conv8)
+        up9 = torch.cat([up9, conv1], 1)
+        conv9 = self.lrelu(self.conv9_1(up9))
+        conv9 = self.lrelu(self.conv9_2(conv9))
+        
+        conv10 = self.conv10_1(conv9)
+        # out = nn.functional.pixel_shuffle(conv10, 2)
+        out = conv10
+        out = self._check_and_crop(out)
+        return out
 
-        return x
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                m.weight.data.normal_(0.0, 0.02)
+                if m.bias is not None:
+                    m.bias.data.normal_(0.0, 0.02)
+            if isinstance(m, nn.ConvTranspose2d):
+                m.weight.data.normal_(0.0, 0.02)
 
+    def lrelu(self, x):
+        outt = torch.max(0.2*x, x)
+        return outt
+    
     def _check_and_padding(self, x):
         _, _, h, w = x.size()
-        stride = 2**3
+        stride = 2**4
         dh = -h % stride
         dw = -w % stride
         top_pad = dh // 2
@@ -323,25 +130,22 @@ class UNet(nn.Module):
         return x
 
 '''
-FLOPs: 85.8782464 G
-Params: 4.708476 M
+FLOPs: 219.311767552 G
+Params: 7.760484 M
 '''
 
-def cal_model_complexity(model, x, metainfoidx):
+def cal_model_complexity(model, x):
     import thop
-    flops, params = thop.profile(model, inputs=(x, metainfoidx,), verbose=False)
+    flops, params = thop.profile(model, inputs=(x,), verbose=False)
     print(f"FLOPs: {flops / 1e9} G")
     print(f"Params: {params / 1e6} M")
 
 if __name__ == '__main__':
-    idx_list = [1,2,3,4,2]
-    metainfoidx = torch.tensor(idx_list, dtype=torch.long).view(-1, 1).unsqueeze(0).cuda()
-    model = UNet(in_channels=4, base_channels=32, embedding_dim=128).cuda()
-    #x = torch.rand(1,4,512,512).cuda()
-    x = torch.rand(1,4,512,512).cuda()
-    cal_model_complexity(model, x, metainfoidx)
+    model = UNet(in_channels=4, out_channels=4).cuda()
+    x = torch.rand(1,4,1024,1024).cuda()
+    cal_model_complexity(model, x)
     import time
     begin = time.time()
-    x = model(x, metainfoidx)
+    x = model(x)
     end = time.time()
     print(f'Time comsumed: {end-begin} s')

@@ -69,13 +69,6 @@ class Downsample(nn.Module):
     def forward(self, x):
         return self.body(x)
 
-class RemainChannelsDown(nn.Module):
-    def __init__(self, in_channels):
-        super(RemainChannelsDown, self).__init__()
-        self.body = nn.Conv2d(in_channels, in_channels, kernel_size=2, stride=2)
-    def forward(self, x):
-        return self.body(x)
-
 class Upsample(nn.Module):
     def __init__(self, n_feat):
         super(Upsample, self).__init__()
@@ -106,6 +99,38 @@ class ChannelAttention(nn.Module):
     def forward(self, x):
         y = self.attention(x)
         return x * y
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, ffn_expansion_factor, bias):
+        super(FeedForward, self).__init__()
+
+        hidden_features = int(dim*ffn_expansion_factor)
+
+        self.conv_r = nn.Sequential(
+            nn.Conv2d(dim, dim, 1),
+            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),
+            nn.GELU()
+        )
+        self.conv_l = nn.Sequential(
+            nn.Conv2d(4, 4, 1),
+            nn.Conv2d(4, 4, 3, padding=1),
+            nn.GELU()
+        )
+        self.project_in = nn.Conv2d(2*dim+4, hidden_features*2, kernel_size=1, bias=bias)
+
+        self.dwconv = nn.Conv2d(hidden_features*2, hidden_features*2, kernel_size=3, stride=1, padding=1, groups=hidden_features*2, bias=bias)
+
+        self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
+
+    def forward(self, x, l, r):
+        #x,r (b,c,h,w)
+        #l (b,4,h,w)
+        x = torch.cat([x, self.conv_r(r), self.conv_l(l)], dim=1)
+        x = self.project_in(x)
+        x1, x2 = self.dwconv(x).chunk(2, dim=1)
+        x = F.gelu(x1) * x2
+        x = self.project_out(x)
+        return x
 
 class SelfAttention(nn.Module):
     def __init__(self, dim, num_heads, bias):
@@ -176,208 +201,6 @@ class MetaIlluminationEstimator(nn.Module):
         l = self.conv2(r) #(b, in_c, h, w)
         return r, l
 
-class FeedForward(nn.Module):
-    def __init__(self, dim, ffn_expansion_factor, bias):
-        super(FeedForward, self).__init__()
-
-        hidden_features = int(dim*ffn_expansion_factor)
-
-        self.conv_r = nn.Sequential(
-            nn.Conv2d(dim, dim, 1),
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),
-            nn.GELU()
-        )
-        self.conv_l = nn.Sequential(
-            nn.Conv2d(4, 4, 1),
-            nn.Conv2d(4, 4, 3, padding=1),
-            nn.GELU()
-        )
-        self.project_in = nn.Conv2d(2*dim+4, hidden_features*2, kernel_size=1, bias=bias)
-
-        self.dwconv = nn.Conv2d(hidden_features*2, hidden_features*2, kernel_size=3, stride=1, padding=1, groups=hidden_features*2, bias=bias)
-
-        self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
-
-    def forward(self, x, l, r):
-        #x,r (b,c,h,w)
-        #l (b,4,h,w)
-        x = torch.cat([x, self.conv_r(r), self.conv_l(l)], dim=1)
-        x = self.project_in(x)
-        x1, x2 = self.dwconv(x).chunk(2, dim=1)
-        x = F.gelu(x1) * x2
-        x = self.project_out(x)
-        return x
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True, memory_efficient=False):
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.elementwise_affine = elementwise_affine
-        if self.elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(dim))
-        else:
-            self.register_parameter('weight', None)
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        if self.weight is not None:
-            output = output * self.weight
-        return output
-
-    def extra_repr(self) -> str:
-        return f'dim={self.dim}, eps={self.eps}, elementwise_affine={self.elementwise_affine}'
-
-'''
-class MultiheadDiffAttn(nn.Module):
-    def __init__(
-        self,
-        args,
-        embed_dim,
-        depth,
-        num_heads,
-    ):
-        super().__init__()
-        self.args = args
-        self.embed_dim = embed_dim
-        
-        # arg num_heads set to half of Transformer's num_heads
-        self.num_heads = num_heads
-        
-        # arg decoder_kv_attention_heads set to half of Transformer's num_kv_heads if use GQA
-        # set to same as num_heads if use normal MHA
-        self.num_kv_heads = args.decoder_kv_attention_heads if args.decoder_kv_attention_heads is not None else num_heads
-        self.n_rep = self.num_heads // self.num_kv_heads
-        
-        self.head_dim = embed_dim // num_heads // 2
-        self.scaling = self.head_dim ** -0.5
-        
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.k_proj = nn.Linear(embed_dim, embed_dim // self.n_rep, bias=False)
-        self.v_proj = nn.Linear(embed_dim, embed_dim // self.n_rep, bias=False)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-
-        self.lambda_init = lambda_init_fn(depth)
-        self.lambda_q1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-        self.lambda_k1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-        self.lambda_q2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-        self.lambda_k2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-
-        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=True)
-    
-    def forward(
-        self,
-        x,
-        rel_pos,
-        attn_mask=None,
-    ):
-        bsz, tgt_len, embed_dim = x.size()#(b,hw,c)
-        src_len = tgt_len
-
-        q = self.q_proj(x)#(b,hw,c)
-        k = self.k_proj(x)#(b,hw,c)
-        v = self.v_proj(x)#(b,hw,c)
-
-        q = q.view(bsz, tgt_len, 2 * self.num_heads, self.head_dim)#(b, hw, 2*num_heads, head_dim)
-        k = k.view(bsz, src_len, 2 * self.num_kv_heads, self.head_dim)#(b, hw, 2*num_heads, head_dim)
-        v = v.view(bsz, src_len, self.num_kv_heads, 2 * self.head_dim)#(b, hw, num_heads, 2*head_dim)
-
-        q = apply_rotary_emb(q, *rel_pos, interleaved=True)
-        k = apply_rotary_emb(k, *rel_pos, interleaved=True)
-
-        offset = src_len - tgt_len
-        q = q.transpose(1, 2)#(b, 2*num_heads, hw, head_dim)
-        k = repeat_kv(k.transpose(1, 2), self.n_rep)#(b, 2*num_heads, hw, head_dim)
-        v = repeat_kv(v.transpose(1, 2), self.n_rep)#(b, num_heads, hw, 2*head_dim)
-        q *= self.scaling
-        attn_weights = torch.matmul(q, k.transpose(-1, -2))#(b, 2*num_heads, hw, hw)
-        if attn_mask is None:
-            attn_mask = torch.triu(
-                torch.zeros([tgt_len, src_len])
-                .float()
-                .fill_(float("-inf"))
-                .type_as(attn_weights),
-                1 + offset,
-            )
-        attn_weights = torch.nan_to_num(attn_weights)
-        attn_weights += attn_mask   
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(
-            attn_weights
-        )
-
-        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(q)
-        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(q)
-        lambda_full = lambda_1 - lambda_2 + self.lambda_init
-        attn_weights = attn_weights.view(bsz, self.num_heads, 2, tgt_len, src_len)#(b, num_heads, 2, hw, hw)
-        attn_weights = attn_weights[:, :, 0] - lambda_full * attn_weights[:, :, 1]#(b, num_heads, hw, hw)
-        
-        attn = torch.matmul(attn_weights, v)#(b, num_heads, hw, 2*head_dim)
-        attn = self.subln(attn)
-        attn = attn * (1 - self.lambda_init)
-        #(b, hw, num_heads, 2*head_dim) -> (b, hw, num_heads*2*head_dim)
-        attn = attn.transpose(1, 2).reshape(bsz, tgt_len, self.num_heads * 2 * self.head_dim)
-
-        attn = self.out_proj(attn)
-        return attn
-'''
-
-class MultiheadDiffAttn(nn.Module):
-    def __init__(self, dim, num_heads, layer, num_meta_keys, meta_dims, bias):
-        super().__init__()
-        self.dim = dim
-
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads // 2
-        self.scaling = self.head_dim ** -0.5
-        self.fc = nn.Linear(num_meta_keys*meta_dims, num_meta_keys)
-        self.qkv = nn.Conv2d(dim+num_meta_keys, dim*3, kernel_size=1, bias=bias)
-        self.qkv_dwconv = nn.Conv2d(dim*3, dim*3, kernel_size=3, stride=1, padding=1, groups=dim*3, bias=bias)
-        self.project_out = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
-
-        self.lambda_init = self.lambda_init_fn(layer)
-        self.lambda_q1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-        self.lambda_k1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-        self.lambda_q2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-        self.lambda_k2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-
-        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=True)
-    
-    def forward(self, x, metainfo):
-        b, c, h, w = x.shape
-
-        metainfo = self.fc(metainfo.flatten(1))#(b, nd) -> (b, n)
-        metainfo = metainfo.unsqueeze(-1).unsqueeze(-1).expand(-1,-1,h,w)
-        qkv = self.qkv_dwconv(self.qkv(torch.cat([x, metainfo], dim=1)))
-        q,k,v = qkv.chunk(3, dim=1)
-        q = rearrange(q, 'b (n head d) h w -> b (n head) d (h w)', head=self.num_heads,d=self.head_dim)#(b, 2*num_heads, c//n_heads//2, hw)
-        k = rearrange(k, 'b (n head d) h w -> b (n head) d (h w)', head=self.num_heads,d=self.head_dim)#(b, 2*num_heads, c//n_heads//2, hw)
-        v = rearrange(v, 'b (n head d) h w -> b head d (n h w)', head=self.num_heads,d=self.head_dim)#(b, num_heads, c//n_heads//2, 2hw)
-
-        q *= self.scaling
-        attn_weights = torch.matmul(q, k.transpose(-1, -2))#(b, 2*num_heads, c//n_heads//2, c//n_heads//2)
-        attn_weights = torch.nan_to_num(attn_weights)
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(attn_weights)
-
-        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(q)
-        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(q)
-        lambda_full = lambda_1 - lambda_2 + self.lambda_init
-        attn_weights = attn_weights.view(b, self.num_heads, 2, self.head_dim, self.head_dim)#(b, num_heads, 2, c//n_heads//2, c//n_heads//2)
-        attn_weights = attn_weights[:, :, 0] - lambda_full * attn_weights[:, :, 1]#(b, num_heads, c//n_heads//2, c//n_heads//2)
-        
-        attn = torch.matmul(attn_weights, v)#(b, num_heads, c//n_heads//2, 2hw)
-        attn = self.subln(attn)
-        attn = attn * (1 - self.lambda_init)
-        attn = rearrange(attn, 'b head d (n h w) -> b (n head d) h w', h=h,w=w)#(b, c, h, w)
-
-        attn = self.project_out(attn)
-        return attn
-    
-    def lambda_init_fn(self, layer):
-        return 0.8 - 0.6 * math.exp(-0.3 * layer)
-
 class MetaAttention(nn.Module):
     def __init__(self, dim, num_heads, num_meta_keys, meta_dims, bias):
         super(MetaAttention, self).__init__()
@@ -393,11 +216,6 @@ class MetaAttention(nn.Module):
         
         self.conv_l = nn.Sequential(
             nn.Conv2d(4, dim, 1),
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),
-            nn.GELU()
-        )
-        self.conv_v = nn.Sequential(
-            nn.Conv2d(2*dim, dim, 1),
             nn.Conv2d(dim, dim, 3, padding=1, groups=dim),
             nn.GELU()
         )
@@ -425,7 +243,7 @@ class MetaAttention(nn.Module):
         attn = attn.softmax(dim=-1)#(b, 1, c//n_head, c//n_head)
         
         l = self.conv_l(l)
-        v = self.conv_v(torch.cat([v, l], dim=1))#2c -> c
+        v = l*v
 
         v = rearrange(v, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
 
@@ -436,12 +254,11 @@ class MetaAttention(nn.Module):
         return x
 
 class MetaTransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, layer, num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type):
+    def __init__(self, dim, num_heads, num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type):
         super(MetaTransformerBlock, self).__init__()
 
         self.norm1 = LayerNorm(dim, LayerNorm_type)
-        #self.meta_attn = MetaAttention(dim, num_heads, num_meta_keys, meta_dims, bias)
-        self.meta_attn = MultiheadDiffAttn(dim, num_heads, layer, num_meta_keys, meta_dims, bias)
+        self.meta_attn = MetaAttention(dim, num_heads, num_meta_keys, meta_dims, bias)
 
         self.norm2 = LayerNorm(dim, LayerNorm_type)
         self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
@@ -451,6 +268,13 @@ class MetaTransformerBlock(nn.Module):
         x = x + self.ffn(self.norm2(x), l, r)
         return x
 
+
+class RemainChannelsDown(nn.Module):
+    def __init__(self, in_channels):
+        super(RemainChannelsDown, self).__init__()
+        self.body = nn.Conv2d(in_channels, in_channels, kernel_size=2, stride=2)
+    def forward(self, x):
+        return self.body(x)
 
 from utils.registry import MODEL_REGISTRY
 @MODEL_REGISTRY.register()
@@ -483,20 +307,20 @@ class MetaRawFormer(nn.Module):
 
         self.encoders = nn.ModuleList([
             nn.ModuleList([
-                MetaTransformerBlock(int(dim*2**i), heads[i], i+1, num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
+                MetaTransformerBlock(int(dim*2**i), heads[i], num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-1)
         ])
         
         self.middle_block = nn.ModuleList([
-            MetaTransformerBlock(int(dim*2**(layers-1)), heads[layers-1], i+1, num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
+            MetaTransformerBlock(int(dim*2**(layers-1)), heads[layers-1], num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
             for _ in range(num_blocks[layers-1])
         ])
         
         self.decoders = nn.ModuleList([
             nn.ModuleList([
-                MetaTransformerBlock(int(dim*2**i), heads[i], i+1, num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
+                MetaTransformerBlock(int(dim*2**i), heads[i], num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-2, -1, -1)
@@ -540,7 +364,7 @@ class MetaRawFormer(nn.Module):
         )
 
         self.refinement = nn.ModuleList([
-            MetaTransformerBlock(2*dim, heads[0], 2, num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
+            MetaTransformerBlock(2*dim, heads[0], num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
             for i in range(num_refinement_blocks)
         ])
 

@@ -1,3 +1,4 @@
+import cv2
 import exifread
 import numpy as np
 import os
@@ -86,6 +87,7 @@ class SIDSonyDataset(data.Dataset):
         
         input_raw = np.ascontiguousarray(input_raw)
         gt_raw = np.ascontiguousarray(gt_raw)
+        mask = self.getMask(input_raw)
 
         input_raw = torch.from_numpy(input_raw).float()
         gt_raw = torch.from_numpy(gt_raw).float()
@@ -97,6 +99,7 @@ class SIDSonyDataset(data.Dataset):
             'gt_raw': gt_raw,
             'input_metainfo': input_metainfo,
             'gt_metainfo': gt_metainfo,
+            'mask': mask,
             'input_path': input_path,
             'gt_path': gt_path,
             'input_exposure': info['input_exposure'],
@@ -104,6 +107,32 @@ class SIDSonyDataset(data.Dataset):
             'ratio': info['ratio']
         }
 
+    def getMask(self, x):
+        '''
+        x: numpy (4, h, w) RGBG
+        '''
+        light = np.transpose(x, (1, 2, 0)) * 255 #(h,w,4)
+        channels = [light[:, :, i] for i in range(4)]#4 (h,w,1)
+        channels = [cv2.blur(channel.astype(np.uint8), (5, 5)) for channel in channels]
+        light = np.stack(channels, axis=-1) #(h,w,4)
+        light = light * 1.0 / 255.0
+        light = np.transpose(light, (2, 0, 1))#(4,h,w) 均值滤波后的先验去噪图像
+        
+        dark = x[0:1, :, :] * 0.298 + x[1:2, :, :] * 0.294 + x[2:3, :, :] * 0.114 + x[3:4, :, :] * 0.294
+        light = light[0:1, :, :] * 0.298 + light[1:2, :, :] * 0.294 + light[2:3, :, :] * 0.114 + light[3:4, :, :] * 0.294
+        
+        dark = torch.from_numpy(dark).float()
+        light = torch.from_numpy(light).float()
+        diff = torch.abs(dark - light)
+        #mask = torch.div(light, noise + 0.0001) #(4,h,w) noise + -> mask -
+
+        diff_max = torch.max(diff)
+
+        mask = diff / (diff_max + 0.0001)
+        mask = torch.clamp(mask, min=0, max=1.0).float()
+        return mask
+
+    
     def getMetaInfoTensor(self, metainfo):
         infos = []
         for i, (k, v) in enumerate(metainfo.items()):
@@ -373,13 +402,23 @@ if __name__=='__main__':
     #dataset = SIDSonyDataset(data_dir='/root/autodl-tmp/datasets/SID/Sony/', image_list_file='test_00.txt',
                             #patch_size=512, split='test')
     dataset = SIDSonyDataset(data_dir='E:\Deep Learning\datasets\RAW\SID\Sony/', image_list_file='test_00.txt', split='test')
-    data = dataset[11]
-    input_metainfo_dict = data['input_metainfo_dict']
-    input_raw, gt_raw, input_metainfoidx, gt_metainfoidx = \
-        data['input_raw'], data['gt_raw'], data['input_metainfoidx'], data['gt_metainfoidx']
-    print(type(input_metainfo_dict), type(input_metainfoidx), type(gt_metainfoidx))
-    print(input_metainfo_dict)
-    print(input_metainfoidx.shape, gt_metainfoidx.shape)
-    print(input_metainfoidx, gt_metainfoidx)
+    data = dataset[7]
+    input_raw, gt_raw, input_metainfo, gt_metainfo, mask = \
+        data['input_raw'], data['gt_raw'], data['input_metainfo'], data['gt_metainfo'], data['mask']
+    print(type(input_metainfo), type(gt_metainfo), type(mask))
+    print(input_metainfo.shape, gt_metainfo.shape, mask.shape)
+    print(input_metainfo, gt_metainfo, mask)
+    print(mask.min(), mask.max())
+    #exit(0)
+    import matplotlib.pyplot as plt
+    mask = mask.view(-1).numpy()
+    #mask = [level for level in mask if level <= 0.002]
+    plt.figure(figsize=(8, 6))
+    plt.hist(mask, bins=50, color='blue', alpha=0.7)
+    plt.title(f'mask distribution')
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.grid(True)
+    plt.show()
 
 

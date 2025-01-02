@@ -107,26 +107,6 @@ class FeedForward(nn.Module):
 
         hidden_features = int(dim*ffn_expansion_factor)
 
-        self.project_in = nn.Conv2d(dim, hidden_features*2, kernel_size=1, bias=bias)
-
-        self.dwconv = nn.Conv2d(hidden_features*2, hidden_features*2, kernel_size=3, stride=1, padding=1, groups=hidden_features*2, bias=bias)
-
-        self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
-
-    def forward(self, x):
-        x = self.project_in(x)
-        x1, x2 = self.dwconv(x).chunk(2, dim=1)
-        x = F.gelu(x1) * x2
-        x = self.project_out(x)
-        return x
-
-
-class RFeedForward(nn.Module):
-    def __init__(self, dim, ffn_expansion_factor, bias):
-        super(RFeedForward, self).__init__()
-
-        hidden_features = int(dim*ffn_expansion_factor)
-
         self.r_in = nn.Sequential(
             nn.Conv2d(dim, dim, 1),
             nn.GELU()
@@ -148,7 +128,7 @@ class RFeedForward(nn.Module):
 
 class SelfAttention(nn.Module):
     def __init__(self, dim, num_heads, bias):
-        super(SelfAttention, self).__init__()
+        super(Attention, self).__init__()
         self.num_heads = num_heads
         self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
         self.qkv = nn.Conv2d(dim, dim*3, kernel_size=1, bias=bias)
@@ -178,57 +158,145 @@ class SelfAttention(nn.Module):
         out = self.project_out(out)
         return out
 
+class MetaIlluminationEstimator(nn.Module):
+    def __init__(self, in_channels, dim, num_meta_keys, meta_dims):
+        super(MetaIlluminationEstimator, self).__init__()
+        self.dim = dim
+        self.conv_in = nn.Conv2d(in_channels, dim, kernel_size=1)
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.fcs = nn.Sequential(
+            nn.Linear(2*dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, 2*dim)
+        )
+        
+        self.meta_fc = nn.Linear(num_meta_keys*meta_dims, dim)
+        
+        self.conv1 = nn.Conv2d(dim+1, dim, kernel_size=1, bias=True)
 
-class TransformerBlcok(nn.Module):
-    def __init__(self, dim, num_heads, ffn_expansion_factor=2.66, bias=False, LayerNorm_type='WithBias'):
-        super(TransformerBlcok, self).__init__()
+        self.depth_conv = nn.Conv2d(dim, dim, kernel_size=5, padding=2, bias=True, groups=in_channels)
+
+        self.conv2 = nn.Conv2d(dim, in_channels, kernel_size=1, bias=True)
+
+    def forward(self, x, metainfo):
+        mean_c = x.mean(dim=1).unsqueeze(1) #(b, 1, h, w)
+        x = self.conv_in(x) #(b,c,h,w)
+        metainfo = self.meta_fc(metainfo.flatten(1))#(b, nd) -> (b, c)
+        squeezed_x = self.squeeze(x).view(-1, self.dim)#(b, c)
+        squeezed_x = torch.cat([squeezed_x, metainfo], dim=1) #(b, 2c)
+        w, bias = torch.chunk(self.fcs(squeezed_x), chunks=2, dim=1) #2 (b, c)
+        w = w.view(-1,self.dim,1,1)
+        bias = bias.view(-1,self.dim,1,1)
+        x = w*x + bias
+
+        x = torch.cat([x,mean_c], dim=1) #(b, in_c + 1, h, w)
+        x_1 = self.conv1(x)
+        r = self.depth_conv(x_1) #(b, c, h, w)
+        l = self.conv2(r) #(b, in_c, h, w)
+        return r, l
+
+class MetaAttention(nn.Module):
+    def __init__(self, dim, num_heads, num_meta_keys, meta_dims, bias):
+        super(MetaAttention, self).__init__()
+        self.num_heads = num_heads
+        self.num_meta_keys = num_meta_keys
+        self.meta_dims = meta_dims
+
+        self.fc = nn.Linear(num_meta_keys*meta_dims, num_meta_keys)
+        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
+        self.qkv = nn.Conv2d(dim+num_meta_keys, dim*3, kernel_size=1, bias=bias)
+        self.qkv_dwconv = nn.Conv2d(dim*3, dim*3, kernel_size=3, stride=1, padding=1, groups=dim*3, bias=bias)
+        self.project_out = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+
+    def forward(self, x, metainfo):
+        #x (b,c,h,w)
+        #metainfo (b,n,d)
+        b,c,h,w = x.shape
+        _,n,d = metainfo.shape
+        metainfo = self.fc(metainfo.flatten(1))#(b, nd) -> (b, n)
+        metainfo = metainfo.unsqueeze(-1).unsqueeze(-1).expand(b,n,h,w)
+        
+        qkv = self.qkv_dwconv(self.qkv(torch.cat([x,metainfo], dim=1)))
+        q,k,v = qkv.chunk(3, dim=1)
+        
+        q = rearrange(q, 'b (head c) h w -> b head c (h w)', head=self.num_heads)#(b, n_head, c//n_head, hw)
+        k = rearrange(k, 'b (head c) h w -> b head c (h w)', head=self.num_heads)#(b, n_head, c//n_head, hw)
+        
+        q = torch.nn.functional.normalize(q, dim=-1)
+        k = torch.nn.functional.normalize(k, dim=-1)
+
+        attn = (q @ k.transpose(-2, -1)) * self.temperature # (b, n_head, c//head, c//head)
+        attn = attn.softmax(dim=-1)
+
+        v = rearrange(v, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+
+        out = (attn @ v)
+        
+        out = rearrange(out, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
+        out = self.project_out(out)
+        return out
+
+class MetaTransformerBlock(nn.Module):
+    def __init__(self, dim, num_heads, num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type):
+        super(MetaTransformerBlock, self).__init__()
 
         self.norm1 = LayerNorm(dim, LayerNorm_type)
-        self.attn = SelfAttention(dim, num_heads, bias)
+        self.meta_attn = MetaAttention(dim, num_heads, num_meta_keys, meta_dims, bias)
+
         self.norm2 = LayerNorm(dim, LayerNorm_type)
         self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
 
-    def forward(self, x):
-        x = x + self.attn(self.norm1(x))
-        x = x + self.ffn(self.norm2(x))
+    def forward(self, x, metainfo, r):
+        x = x + self.meta_attn(self.norm1(x), metainfo)
+        x = x + self.ffn(self.norm2(x), r)
         return x
 
 
 from utils.registry import MODEL_REGISTRY
 @MODEL_REGISTRY.register()
-class Baseline(nn.Module):
+class MetaRawFormer(nn.Module):
     def __init__(self, 
         in_channels=4, 
         out_channels=4, 
         dim=32,
         layers=4,
-        num_blocks=[2,2,2,2], 
+        num_meta_keys=4,
+        meta_dims=32,
+        num_blocks=[2,2,2,4], 
         num_refinement_blocks=2,
-        heads=[1,2,4,8]
+        heads=[1,2,4,8],
+        ffn_expansion_factor=2.66,
+        bias=False,
+        LayerNorm_type='WithBias'
     ):
 
-        super(Baseline, self).__init__()
+        super(MetaRawFormer, self).__init__()
         assert len(num_blocks) == layers and len(heads) == layers
+
+        self.num_meta_keys = num_meta_keys
+        self.meta_dims = meta_dims
+        self.meta_project = nn.Linear(num_meta_keys, num_meta_keys*meta_dims)
 
         self.in_conv = nn.Conv2d(in_channels, dim, 3, padding=1)
 
+        self.mie = MetaIlluminationEstimator(in_channels=in_channels, dim=dim, num_meta_keys=num_meta_keys, meta_dims=meta_dims)
 
         self.encoders = nn.ModuleList([
             nn.ModuleList([
-                TransformerBlcok(int(dim*2**i), heads[i])
+                MetaTransformerBlock(int(dim*2**i), heads[i], num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-1)
         ])
         
         self.middle_block = nn.ModuleList([
-            TransformerBlcok(int(dim*2**(layers-1)), heads[layers-1])
+            MetaTransformerBlock(int(dim*2**(layers-1)), heads[layers-1], num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
             for _ in range(num_blocks[layers-1])
         ])
         
         self.decoders = nn.ModuleList([
             nn.ModuleList([
-                TransformerBlcok(int(dim*2**i), heads[i])
+                MetaTransformerBlock(int(dim*2**i), heads[i], num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-2, -1, -1)
@@ -260,8 +328,14 @@ class Baseline(nn.Module):
             nn.Conv2d(2*dim, 2*dim, 1),
         )
         
+        self.refine_conv_r = nn.Sequential(
+            nn.Conv2d(dim, 2*dim, 3, padding=1, groups=dim),
+            nn.GELU(),
+            nn.Conv2d(2*dim, 2*dim, 1),
+        )
+
         self.refinement = nn.ModuleList([
-            TransformerBlcok(dim*2, heads[0])
+            MetaTransformerBlock(2*dim, heads[0], num_meta_keys, meta_dims, ffn_expansion_factor, bias, LayerNorm_type)
             for i in range(num_refinement_blocks)
         ])
 
@@ -273,34 +347,47 @@ class Baseline(nn.Module):
             nn.Conv2d(dim, out_channels, 1)
         )
 
-    def forward(self, x):
+    def forward(self, x, metainfo):
+        #matainfo : (b,n)
+        #mask (b,1,h,w)
         x = self._check_and_padding(x)
         shortcut = x
+        metainfo = self.meta_project(metainfo).view(-1, self.num_meta_keys, self.meta_dims)#(b,n,d)
+        
+        r, l = self.mie(x, metainfo) #(b,c,h,w) (b,4,h,w)
+        x = l * x #(b,4,h,w)
 
         x = self.in_conv(x)#c
 
+        rs = []
+        for r_down in self.r_downs:
+            rs.append(r)
+            r = r_down(r)
+
         encode_features = []
-        for encodes, down in zip(self.encoders, self.downs):
+        for encodes, _r, down in zip(self.encoders, rs, self.downs):
             for encode in encodes:
-                x = encode(x)
+                x = encode(x, metainfo, _r)
             encode_features.append(x)
             x = down(x)
 
         for block in self.middle_block:
-            x = block(x)
+            x = block(x, metainfo, r)
         
         encode_features.reverse()
-        for up, fuse, feature, decodes in zip(
-            self.ups, self.fuses, encode_features, self.decoders
+        rs.reverse()
+        for up, fuse, feature, decodes, r in zip(
+            self.ups, self.fuses, encode_features, self.decoders, rs
         ):
             x = up(x)
             x = fuse(x, feature)
             for decode in decodes:
-                x = decode(x)
+                x = decode(x, metainfo, r)
 
         x = self.refine_conv(x)
+        r = self.refine_conv_r(rs[-1])
         for refine_block in self.refinement:
-            x = refine_block(x)
+            x = refine_block(x, metainfo, r)
 
         x = self.output(x)
         x = x + shortcut
@@ -330,21 +417,23 @@ class Baseline(nn.Module):
         x = x[:, :, top:bottom, left:right]
         return x
 
-def cal_model_complexity(model, x):
+def cal_model_complexity(model, x, metainfo):
     import thop
-    flops, params = thop.profile(model, inputs=(x,), verbose=False)
+    flops, params = thop.profile(model, inputs=(x, metainfo,), verbose=False)
     print(f"FLOPs: {flops / 1e9} G")
     print(f"Params: {params / 1e6} M")
 
 if __name__ == '__main__':
-    model = Baseline(in_channels=4, out_channels=4, dim=32, layers=4,
+    model = MetaRawFormer(in_channels=4, out_channels=4, dim=32, layers=4,
+                        num_meta_keys=4, meta_dims=32, 
                         num_blocks=[2,2,2,4], num_refinement_blocks=2, heads=[1, 2, 4, 8]).cuda()
+    metainfo = torch.rand((1,4)).cuda()
     x = torch.rand(1,4,1024,1024).cuda()
     with torch.no_grad():
-        cal_model_complexity(model, x)
+        cal_model_complexity(model, x, metainfo)
         exit(0)
         import time
         begin = time.time()
-        x = model(x)
+        x = model(x, metainfo)
         end = time.time()
         print(f'Time comsumed: {end-begin} s')
