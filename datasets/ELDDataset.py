@@ -1,103 +1,113 @@
 import os
+import re
 import torch
 import rawpy
 import numpy as np
 import exifread
 from torch.utils.data import Dataset
 import sys
-sys.path.append('/root/autodl-tmp/Generalization')
+sys.path.append('E:\Deep Learning\MetaRawFormer\MetaRawFormer')
 #Notice: The ELD dataset is only for evaluation
 
 from utils.registry import DATASET_REGISTRY
 @DATASET_REGISTRY.register()
 class ELDDataset(Dataset):
-    def __init__(self, datadir, camera, pairs_file_path, patch_size=None, **kwargs):
+    def __init__(self, data_dir, camera, pairs_file_path, metarange_file='metarange.txt', patch_size=None, split='train',
+                transpose=False, h_flip=False, v_flip=False, **kwargs):
         super(ELDDataset, self).__init__()
         assert camera in ['CanonEOS70D', 'CanonEOS700D', 'NikonD850', 'SonyA7S2']
-        self.datadir = datadir
+        self.data_dir = data_dir
         self.camera = camera
+        self.split = split
         self.patch_size = patch_size
-        self.pairs_file_path=os.path.join(datadir, pairs_file_path)
-                #===================================================================
-        #self.keys = ['ExposureTime', 'FNumber', 'FocalLength', 'ISOSpeedRating', 'MeteringMode']
-        #self.keys = ['ExposureTime', 'ISOSpeedRating', 'FNumber', 'FocalLength']
-        #self.ExposureTime_table = [
-        #    1/3200, 1/2000, 1/1600, 1/1000, 1/800, 1/500,1/400, 1/250, 1/200, 1/160, 1/100, 1/80, 1/50,1/40, 1/30, 1/25, 1/20, 1/15, 1/10, 1/8, 1/5,1/4, 2/5, 1/2, 2, 16/5, 4, 10, 30
-        #]#29 intervals + 1 out of table
-        #self.exposure_to_index = {i: idx for idx, i in enumerate(range(len(self.ExposureTime_table) - 1))}
-        
-        #self.ISOSpeedRating_table=[
-        #    50, 64, 80, 100, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800, 16000, 25600
-        #]#25 intervals + 1 out of table
-        #self.iso_to_index = {i: idx for idx, i in enumerate(range(len(self.ISOSpeedRating_table) - 1))}
-        
-        #self.Fnumber_table = [None] + [i for i in range(25)]#26
-        #self.FocalLength_table = [None] + [i for i in range(1, 249)]#250
-        #self.MeteringMode_table = [None, 'CenterWeightedAverage', 'Pattern']#3
-        #self.Fnumber_table = [16/5, 4, 9/2, 5, 28/5, 63/10, 71/10, 8, 9, 10, 11, 13, 14, 16, 18, 22]
-        #self.FocalLength_table = [21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 38, 39, 41, 42, 44,  45, 46, 47, 48, 49, 50, 53, 54, 57, 59, 61, 63,66, 67, 73, 78, 82, 83, 87, 89, 90, 120, 128, 139, 166, 181, 223]
-        self.keys_min_max=[[1/3200, 30],[50, 25600],[16/5, 22],[21, 223]]
-        #assert len(self.keys) == len(self.keys_min_max)
-        #self.dicts = {
-        #    'ExposureTime': self.ExposureTime_table,
-        #    'ISOSpeedRating': self.ISOSpeedRating_table,
-        #    'FNumber': self.Fnumber_table,
-        #    'FocalLength': self.FocalLength_table
-            #'MeteringMode': self.MeteringMode_table
-        #} 
+        self.transpose = transpose
+        self.h_flip = h_flip
+        self.v_flip = v_flip
+        self.pairs_file_path=os.path.join(data_dir, pairs_file_path)
+        self.metarange_file = os.path.join(data_dir, camera, metarange_file)
+        #===================================================================
+        #self.keys_min_max=[[1/3200, 30],[50, 25600],[16/5, 22],[21, 223]]
+        self.keys_min_max = {}
+        with open(self.metarange_file, 'r') as f:
+            for i, key_min_max in enumerate(f):
+                key_min_max = key_min_max.strip()
+                key, _min, _max = key_min_max.split(' ')
+                self.keys_min_max[key] = [eval(_min), eval(_max)]
+        #===================================================================
         self.img_info=[]
         with open(self.pairs_file_path, 'r') as f:
             for i, img_pair in enumerate(f):
                 img_pair = img_pair.strip()
-                input_path, gt_path, _ = img_pair.split(' ')
-                input_path = os.path.join(datadir, self.camera, input_path)
-                gt_path = os.path.join(datadir, self.camera, gt_path)
+                input_path, gt_path, ratio = img_pair.split(' ')
+                input_path = os.path.join(data_dir, self.camera, input_path)
+                gt_path = os.path.join(data_dir, self.camera, gt_path)
+
+                _id = os.path.basename(input_path)#10003_00_10s.ARW
+                _id, extension = os.path.splitext(_id)#10003_00_10s    .ARW
+                metainfo_path = os.path.join(self.data_dir, self.camera, _id + '.txt')
+                meta = {}
+                with open(metainfo_path, 'r') as f:
+                    for i, k_v in enumerate(f):
+                        k_v = k_v.strip()#"ISO": "200"
+                        if k_v:
+                            key, value = k_v.split(': ')
+                            key = key.strip('"')
+                            value = value.strip('"')
+                            if key == 'ExposureTime':
+                                value = float(eval(value))
+                            elif key == 'FocalLength':
+                                value = float(re.search(r'(\d+(\.\d+)?)', value).group(1))
+                            elif key in ['BrightnessValue','ColorMatrix', 'BlueBalance', 'RedBalance', 'LightValue']:
+                                continue
+                            else:
+                                value = eval(value)
+                            meta[key] = value
                 self.img_info.append({
                     'input_path': input_path,
-                    'gt_path': gt_path
+                    'gt_path': gt_path,
+                    'meta': meta,
+                    'ratio': np.float32(ratio),
                 })
+        print("processing: {} images for {}".format(len(self.img_info), self.split))
 
     def __getitem__(self, index):
         info = self.img_info[index]
         input_path = info['input_path']
         gt_path = info['gt_path']
-
-        gt_meta = self.metainfo(gt_path)
-        iso, expo = gt_meta['ISOSpeedRating'], gt_meta['ExposureTime']
-        gt_expo = iso * expo
-        
-        input_meta = self.metainfo(input_path)
-        iso, expo = input_meta['ISOSpeedRating'], input_meta['ExposureTime']
-
-        ratio = gt_expo / (iso * expo)
         
         with rawpy.imread(input_path) as raw:
-            input = self.pack_raw_bayer(raw) * ratio
+            input = self.pack_raw_bayer(raw) * info['ratio']
 
         with rawpy.imread(gt_path) as raw:
             gt = self.pack_raw_bayer(raw)
-            
-        if self.patch_size:
-            input, gt = self.crop_center_patch(input, gt, self.patch_size)
-
-        input = np.maximum(np.minimum(input, 1.0), 0)
-        gt = np.maximum(np.minimum(gt, 1.0), 0)
+        
+        
+        if self.split == 'train':
+            if self.h_flip and np.random.randint(0,2) == 1:  # random horizontal flip
+                input = np.flip(input, axis=2)
+                gt = np.flip(gt, axis=2)
+            if self.v_flip and np.random.randint(0,2) == 1:  # random vertical flip
+                input = np.flip(input, axis=1)
+                gt = np.flip(gt, axis=1)
+            if self.transpose and np.random.randint(0,2) == 1:  # random transpose
+                input = np.transpose(input, (0, 2, 1))
+                gt = np.transpose(gt, (0, 2, 1)) 
+            if self.patch_size:
+                input, gt = self.crop_random_patch(input, gt, self.patch_size)
+                input = input.copy()
+                gt = gt.copy()
         
         input = np.ascontiguousarray(input)
         gt = np.ascontiguousarray(gt)
         input = torch.from_numpy(input)
         gt = torch.from_numpy(gt)
         
-        #input_metainfoidx = self.getMetaInfoIdx(input_meta)
-        #gt_metainfoidx = self.getMetaInfoIdx(gt_meta)
-        input_metainfo = self.getMetaInfoTensor(input_meta)
-        gt_metainfo = self.getMetaInfoTensor(gt_meta)
+        input_metainfo = self.getMetaInfoTensor(info['meta'])
 
         data = {
             'input_raw': input, 
             'gt_raw': gt, 
             'input_metainfo': input_metainfo,
-            'gt_metainfo': gt_metainfo,
             'input_path':input_path, 
             'gt_path': gt_path
         }
@@ -108,86 +118,20 @@ class ELDDataset(Dataset):
         return len(self.img_info)
     
     def getMetaInfoTensor(self, metainfo):
-        infos = []
+        res = []
         for i, (k, v) in enumerate(metainfo.items()):
-            min = self.keys_min_max[i][0]
-            max = self.keys_min_max[i][1]
-            infos.append(torch.tensor((v - min) / (max - min), dtype=torch.float32))
-        return torch.tensor(infos).unsqueeze(-1)
+            min = self.keys_min_max[k][0]
+            max = self.keys_min_max[k][1]
+            res.append(torch.tensor(v/max, dtype=torch.float32))
+        return torch.tensor(res)
     
-    def metainfo(self, rawpath):
-        with open(rawpath, 'rb') as f:
-            tags = exifread.process_file(f)
-            _, suffix = os.path.splitext(os.path.basename(rawpath))
-            tag_prefix = 'Image' if suffix == '.dng' else 'EXIF'
-            info = {
-                'ExposureTime': eval(str(tags[f'{tag_prefix} ExposureTime'])),
-                'ISOSpeedRating': eval(str(tags[f'{tag_prefix} ISOSpeedRatings'])),
-                'FNumber': eval(str(tags[f'{tag_prefix} FNumber'])),
-                'FocalLength': eval(str(tags[f'{tag_prefix} FocalLength']))
-                #'MeteringMode': str(tags[f'{tag_prefix} MeteringMode'])
-            }
-        return info
-    '''
-    def get_exposure_index(self, exposure):
-        num_intervals = len(self.ExposureTime_table)
-        for idx, boundary in enumerate(self.ExposureTime_table):
-            if exposure < boundary:
-                return self.exposure_to_index.get(idx - 1, num_intervals - 1)
-        return num_intervals - 1  # 对于超出最大范围的曝光时长，返回最后一个区间的索引
-
-    def get_iso_index(self, iso):
-        num_intervals = len(self.ISOSpeedRating_table)
-        for idx, boundary in enumerate(self.ISOSpeedRating_table):
-            if iso <= boundary:
-                return self.iso_to_index.get(idx, num_intervals - 1)
-        return num_intervals - 1  # 对于超出最大范围的ISO值，返回最后一个区间的索引
-    
-    def get_index_from_dict(self, value, key):
-        if value in self.dicts[key]:
-            return self.dicts[key].index(value)
-        else:
-            return 0
-    
-    def getMetaInfoIdx(self, metainfo):
-        idx_list  = []
-        #['ExposureTime', 'FNumber', 'FocalLength', 'ISOSpeedRating', 'MeteringMode']
-        idx_list.append(self.get_exposure_index(metainfo['ExposureTime']))
-        idx_list.append(self.get_iso_index(metainfo['ISOSpeedRating']))
-        idx_list.append(self.get_index_from_dict(metainfo['FNumber'], 'FNumber'))
-        idx_list.append(self.get_index_from_dict(metainfo['FocalLength'], 'FocalLength'))
-        idx_list.append(self.get_index_from_dict(metainfo['MeteringMode'], 'MeteringMode'))
-
-        return torch.tensor(idx_list , dtype=torch.long)
-    '''
-    
-    def crop_center_patch(self, input_raw, gt_raw, patch_size):
-        '''
-        input_raw, gt_raw: numpy with shape (4,H/2,W/2)
-        '''
+    def crop_random_patch(self, input_raw, gt_raw, patch_size):
         _, H, W = input_raw.shape
-        yy, xx = (H - patch_size) // 2,  (W - patch_size) // 2
+        yy, xx = np.random.randint(0, H - patch_size),  np.random.randint(0, W - patch_size)
         input_raw = input_raw[:, yy:yy + patch_size, xx:xx + patch_size]
         gt_raw = gt_raw[:, yy:yy + patch_size, xx:xx + patch_size]
-    
+
         return input_raw, gt_raw
-    
-    '''
-    def metainfo(self, rawpath):
-        with open(rawpath, 'rb') as f:
-            tags = exifread.process_file(f)
-            _, suffix = os.path.splitext(os.path.basename(rawpath))
-            if suffix == '.dng':
-                expo = eval(str(tags['Image ExposureTime']))
-                iso = eval(str(tags['Image ISOSpeedRatings']))
-            else:
-                expo = eval(str(tags['EXIF ExposureTime']))
-                iso = eval(str(tags['EXIF ISOSpeedRatings']))
-        return iso, expo
-    '''
-
-
-
     
     def pack_raw_bayer(self, raw):
         im = raw.raw_image_visible.astype(np.float32)
@@ -215,12 +159,13 @@ class ELDDataset(Dataset):
         return out
 
 if __name__ == '__main__':
-    ELD_SonyA7S2_dataset = ELDDataset(datadir='E:\Deep Learning\datasets\RAW\ELD', 
-                                      camera='SonyA7S2',pairs_file_path='SonyA7S2_100.txt',patch_size=512)
+    ELD_SonyA7S2_dataset = ELDDataset(data_dir='E:\Deep Learning\datasets\RAW\ELD', 
+                                    camera='SonyA7S2', pairs_file_path='SonyA7S2_100.txt', split='test', patch_size=512)
     data = ELD_SonyA7S2_dataset[7]
     print(len(ELD_SonyA7S2_dataset))
-    input, gt, input_path, gt_path = data['input'], data['gt'], data['input_path'], data['gt_path']
+    input, gt, input_path, gt_path, meta = data['input_raw'], data['gt_raw'], data['input_path'], data['gt_path'], data['input_metainfo']
     print(input_path, gt_path)
     print(type(input), type(gt))
     print(input.shape, gt.shape)
     print(input.min(), input.max(), gt.min(), gt.max())
+    print(meta)

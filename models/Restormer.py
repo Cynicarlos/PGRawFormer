@@ -311,19 +311,32 @@ def cal_model_complexity(model, x):
     print(f"Params: {params / 1e6} M")
 
 if __name__ == '__main__':
-    model = Restormer(inp_channels=4, out_channels=4, dim=32, num_blocks=[2, 4, 4, 2], num_refinement_blocks=2,heads=[1, 2, 4, 8]).cuda()
-    x = torch.rand(1,4,512,512).cuda()
-    #x = torch.rand(1,4,1424,2128).cuda()
-    #x = torch.rand(1,4,712,1064).cuda()
-    cal_model_complexity(model, x)
-    import time
-    begin = time.time()
-    x = model(x)
-    end = time.time()
-    print(f'Time comsumed: {end-begin} s')
-    
-'''
-FLOPs: 145.959288832 G
-Params: 5.616964 M
-Time comsumed: 0.08577775955200195 s
-'''
+    model = Restormer(inp_channels=4, out_channels=4, dim=32).cuda()
+    iterations = 10
+
+    random_input = torch.randn(1, 4, 1024, 1024).cuda()
+
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+    times = torch.zeros(iterations)
+
+    with torch.no_grad():
+        for _ in range(10):
+            _ = model(random_input)
+
+    from tqdm import tqdm
+    with torch.no_grad():
+        for iter in tqdm(range(iterations), desc="Measuring Inference Time", unit="iteration"):
+            starter.record()
+            _ = model(random_input)
+            ender.record()
+
+            torch.cuda.synchronize()
+            curr_time = starter.elapsed_time(ender)
+            times[iter] = curr_time
+
+    mean_time = times.mean().item()
+    fps = 1000 / mean_time
+
+    print(f"Inference time: {mean_time:.6f} ms, FPS: {fps:.2f}")
+    exit(0)

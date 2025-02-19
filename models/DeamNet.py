@@ -306,9 +306,8 @@ class DeamNet(nn.Module):
 
 
 '''
-FLOPs: 145.917739008 G
+FLOPs: 2334.683824128 G
 Params: 1.876772 M
-Time comsumed: 0.027121543884277344 s
 '''
 def cal_model_complexity(model, x):
     import thop
@@ -318,12 +317,32 @@ def cal_model_complexity(model, x):
 
 if __name__ == '__main__':
     model = DeamNet(Isreal=True).cuda()
-    x = torch.rand(1,4,256,256).cuda()
-    trainable_num = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Params: {trainable_num / 1e6} M")
-    cal_model_complexity(model, x)
-    import time
-    begin = time.time()
-    x = model(x)
-    end = time.time()
-    print(f'Time comsumed: {end-begin} s')
+    
+    iterations = 10
+
+    random_input = torch.randn(1, 4, 1024, 1024).cuda()
+
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+    times = torch.zeros(iterations)
+
+    with torch.no_grad():
+        for _ in range(10):
+            _ = model(random_input)
+
+    from tqdm import tqdm
+    with torch.no_grad():
+        for iter in tqdm(range(iterations), desc="Measuring Inference Time", unit="iteration"):
+            starter.record()
+            _ = model(random_input)
+            ender.record()
+
+            torch.cuda.synchronize()
+            curr_time = starter.elapsed_time(ender)
+            times[iter] = curr_time
+
+    mean_time = times.mean().item()
+    fps = 1000 / mean_time
+
+    print(f"Inference time: {mean_time:.6f} ms, FPS: {fps:.2f}")
+    exit(0)

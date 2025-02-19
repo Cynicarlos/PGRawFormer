@@ -95,56 +95,9 @@ class SimpleFuse(nn.Module):
     def forward(self, x, y):
         return self.body(torch.cat([x,y],dim=1))
 
-class IlluminationEstimator(nn.Module):
-    def __init__(self, in_channels, dim):
-        super(IlluminationEstimator, self).__init__()
-        self.dim = dim
-        self.conv1 = nn.Conv2d(in_channels+1, dim, 3, padding=1)
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(dim, dim, 5, padding=2, groups=dim),
-            nn.GELU(),
-            nn.Conv2d(dim, in_channels, 1)
-        )
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(dim, dim, 5, padding=2, groups=dim),
-            nn.GELU(),
-            nn.Conv2d(dim, dim, 1)
-        )
-
-    def forward(self, x):
-        x = torch.cat([x, x.mean(dim=1).unsqueeze(1)],dim=1) #(b, in_c + 1, h, w)
-        x = self.conv1(x)
-        l = self.conv2(x) #(b, in_c, h, w)
-        r = self.conv3(x) #(b, c, h, w)
-        return l, r
-
-class PFuse(nn.Module):
-    def __init__(self, dim, num_meta_keys):
-        super(PFuse, self).__init__()
-        self.meta_fc1 = nn.Linear(num_meta_keys, num_meta_keys)
-        self.meta_fc2 = nn.Linear(num_meta_keys, dim)
-        self.conv_in = nn.Conv2d(dim, 2*dim, 1)
-        self.conv1 = nn.Conv2d(dim+num_meta_keys, dim, 1)
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(2*dim, 2*dim, 3, padding=1, groups=dim),
-            nn.Conv2d(2*dim, dim, 1)
-        )
-        
-    def forward(self, x, metainfo):
-        _,_,h,w = x.shape
-        shortcut = x
-        x, x1 = self.conv_in(x).chunk(2, dim=1)
-        x = self.conv1(torch.cat([x, self.meta_fc1(metainfo).unsqueeze(-1).unsqueeze(-1).expand(-1,-1,h,w)], dim=1))
-        x1 = x1 * self.meta_fc2(metainfo).unsqueeze(-1).unsqueeze(-1)
-        x = torch.cat([x, x1], dim=1)
-        x = self.conv2(x)
-        x = x + shortcut
-        return x
-
-class PGFFN(nn.Module):
-    def __init__(self, dim, num_meta_keys, ffn_expansion_factor, bias):
-        super(PGFFN, self).__init__()
-        self.pfuse = PFuse(dim=dim, num_meta_keys=num_meta_keys)
+class FFN(nn.Module):
+    def __init__(self, dim, ffn_expansion_factor, bias):
+        super(FFN, self).__init__()
 
         hidden_features = int(dim*ffn_expansion_factor)
 
@@ -154,8 +107,7 @@ class PGFFN(nn.Module):
 
         self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
 
-    def forward(self, x, metainfo):
-        x = self.pfuse(x, metainfo)
+    def forward(self, x):
         x = self.project_in(x)
         x1, x2 = self.dwconv(x).chunk(2, dim=1)
         x = F.gelu(x1) * x2
@@ -169,12 +121,7 @@ class PGCSA(nn.Module):
         self.temperature = nn.Parameter(torch.ones(1, 1, 1))
         self.q = nn.Linear(dim, dim//num_heads, bias=False)
         self.k = nn.Linear(dim, dim//num_heads, bias=False)
-        self.v1 = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),
-            nn.Conv2d(dim, dim, 1)
-        )
-        self.v2 = nn.Linear(dim, dim, bias=False)
-        self.v = nn.Linear(2*dim, dim)
+        self.v = nn.Linear(dim, dim, bias=False)
         
         self.refine_l = nn.Linear(in_channels, dim)
         self.refine_r = nn.Linear(dim, dim)
@@ -182,22 +129,15 @@ class PGCSA(nn.Module):
         self.linear_out = nn.Linear(dim//num_heads, dim//num_heads, bias=True)
         self.conv_out = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
 
-    def forward(self, x, l, r):
+    def forward(self, x):
         #x, r (b,c,h,w)
         #l (b,in_c,h,w)
         b,c,h,w = x.shape
-        l = rearrange(l, 'b c h w -> b (h w) c')
-        r = rearrange(r, 'b c h w -> b (h w) c')
-        
-        v1 = self.v1(x) #(b,c,h,w)
-        v1 = rearrange(v1, 'b c h w -> b (h w) c')
         
         x = rearrange(x, 'b c h w -> b (h w) c')
         q = self.q(x)
         k = self.k(x)
-        v2 = self.v2(x) # (b, hw, c)
-        v2 = self.refine_l(l)*v2 + self.refine_r(r)
-        v = self.v(torch.cat([v1, v2], dim=-1))
+        v = self.v(x) # (b, hw, c)
         
         q = rearrange(q, 'b l (head c) -> b head c l', head=1)#(b, 1, c//mum_heads, hw)
         k = rearrange(k, 'b l (head c) -> b head c l', head=1)#(b, 1, c//mum_heads, hw)
@@ -214,18 +154,18 @@ class PGCSA(nn.Module):
         return x
 
 class PGFormerBlock(nn.Module):
-    def __init__(self, dim, num_heads, in_channels, num_meta_keys, ffn_expansion_factor, bias, LayerNorm_type):
+    def __init__(self, dim, num_heads, in_channels, ffn_expansion_factor, bias, LayerNorm_type):
         super(PGFormerBlock, self).__init__()
 
         self.norm1 = LayerNorm(dim, LayerNorm_type)
         self.csa = PGCSA(dim, in_channels, num_heads, bias)
 
         self.norm2 = LayerNorm(dim, LayerNorm_type)
-        self.ffn = PGFFN(dim, num_meta_keys, ffn_expansion_factor, bias)
+        self.ffn = FFN(dim, ffn_expansion_factor, bias)
 
-    def forward(self, x, l, r, metainfo):
-        x= x + self.csa(self.norm1(x), l, r)
-        x = x + self.ffn(self.norm2(x), metainfo)
+    def forward(self, x):
+        x= x + self.csa(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
         return x
 
 from utils.registry import MODEL_REGISTRY
@@ -250,25 +190,23 @@ class PGRawFormer(nn.Module):
         self.conv_in = nn.Sequential(
             nn.Conv2d(in_channels, dim, 3, padding=1)
         )
-        
-        self.ie = IlluminationEstimator(in_channels=in_channels, dim=dim)
 
         self.encoders = nn.ModuleList([
             nn.ModuleList([
-                PGFormerBlock(int(dim*2**i), heads[i], in_channels, num_meta_keys, ffn_expansion_factor, bias, LayerNorm_type)
+                PGFormerBlock(int(dim*2**i), heads[i], in_channels, ffn_expansion_factor, bias, LayerNorm_type)
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-1)
         ])
         
         self.middle_block = nn.ModuleList([
-            PGFormerBlock(int(dim*2**(layers-1)), heads[layers-1], in_channels, num_meta_keys, ffn_expansion_factor, bias, LayerNorm_type)
+            PGFormerBlock(int(dim*2**(layers-1)), heads[layers-1], in_channels, ffn_expansion_factor, bias, LayerNorm_type)
             for _ in range(num_blocks[layers-1])
         ])
         
         self.decoders = nn.ModuleList([
             nn.ModuleList([
-                PGFormerBlock(int(dim*2**i), heads[i], in_channels, num_meta_keys, ffn_expansion_factor, bias, LayerNorm_type)
+                PGFormerBlock(int(dim*2**i), heads[i], in_channels, ffn_expansion_factor, bias, LayerNorm_type)
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-2, -1, -1)
@@ -279,13 +217,6 @@ class PGRawFormer(nn.Module):
             for i in range (layers-1)
         ])
         
-        self.l_down = nn.AvgPool2d(2, 2)
-        
-        self.r_downs = nn.ModuleList([
-            Downsample(n_feat=dim*2**i)
-            for i in range (layers-1)
-        ])
-
         self.ups = nn.ModuleList([
             Upsample(n_feat=dim*2**i)
             for i in range (layers-1, -1, -1) 
@@ -304,38 +235,28 @@ class PGRawFormer(nn.Module):
         #matainfo : (b,n)
         x = self._check_and_padding(x)
         shortcut = x
-        
-        l, r = self.ie(x) #(b, c_in, h, w) (b, c, h, w)
+
         x = self.conv_in(x)
-        
-        ls = []
-        rs = []
-        for r_down in self.r_downs:
-            ls.append(l)
-            l = self.l_down(l)
-            rs.append(r)
-            r = r_down(r)
 
         encode_features = []
-        for encodes, _l, _r, down in zip(self.encoders, ls, rs, self.downs):
+        for encodes, down in zip(self.encoders, self.downs):
             for encode in encodes:
-                x = encode(x, _l, _r, metainfo)
+                x = encode(x)
             encode_features.append(x)
             x = down(x)
 
         for block in self.middle_block:
-            x = block(x, l, r, metainfo)
+            x = block(x)
         
         encode_features.reverse()
-        ls.reverse()
-        rs.reverse()
-        for up, fuse, feature, decodes, l, r in zip(
-            self.ups, self.fuses, encode_features, self.decoders, ls, rs
+
+        for up, fuse, feature, decodes in zip(
+            self.ups, self.fuses, encode_features, self.decoders
         ):
             x = up(x)
             x = fuse(x, feature)
             for decode in decodes:
-                x = decode(x, l, r, metainfo)
+                x = decode(x)
         x = self.output(x)
         x = x + shortcut
         x = self._check_and_crop(x)
@@ -370,7 +291,6 @@ def cal_model_complexity(model, x, metainfo):
     print(f"FLOPs: {flops / 1e9} G")
     print(f"Params: {params / 1e6} M")
 
-
 if __name__ == '__main__':
     from tqdm import tqdm
     model = PGRawFormer(in_channels=4, out_channels=4, dim=32, layers=4,num_meta_keys=4,
@@ -404,3 +324,15 @@ if __name__ == '__main__':
     fps = 1000 / mean_time
 
     print(f"Inference time: {mean_time:.6f} ms, FPS: {fps:.2f}")
+
+
+    # x = torch.rand(1,4,1024,1024).cuda()
+    # metainfo = torch.rand((1,4)).cuda()
+    # with torch.no_grad():
+    #     cal_model_complexity(model, x, metainfo)
+    #     #exit(0)
+    #     import time
+    #     begin = time.time()
+    #     x = model(x, metainfo)
+    #     end = time.time()
+    #     print(f'Time comsumed: {end-begin} s')

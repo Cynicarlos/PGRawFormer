@@ -91,12 +91,10 @@ def test(model, dataloader, camera, ratio, merge_test=False, num_patch=None, wit
 
 if __name__ == "__main__":
     os.makedirs('results/ELD', exist_ok=True)
-    datadir='/root/autodl-tmp/datasets/ELD/'
-    #datadir='/data/dataset/Carlos/ELD' #30
+    data_dir='/data/dataset/Carlos/ELD' #30
     parser = argparse.ArgumentParser()
     parser.add_argument('--with_metainfo', action='store_true', default=False)
     parser.add_argument('--merge_test', action='store_true', default=False)
-    #parser.add_argument('--num_patch', type=int, default=None)
     args = parser.parse_args()
     
     with open('configs/sony.yaml', 'r') as file:
@@ -104,22 +102,20 @@ if __name__ == "__main__":
     set_random_seed(config['manual_seed'])
     model_name, model = build_model(config['model'])
     model = model.cuda()
-    checkpoint = torch.load('/root/autodl-tmp/MetaRawDenoising/runs/SONY/checkpoints/best_model.pth') 
-    #checkpoint = torch.load('/data/model/Carlos/RAWDenoising/runs/SONY/checkpoints/best_model.pth') #30
+    checkpoint = torch.load('/data/model/Carlos/RAWDenoising/best_model.pth') #30
     model.load_state_dict(checkpoint['model'])
 
     cameras = ['SonyA7S2', 'NikonD850', 'CanonEOS70D', 'CanonEOS700D']
     #cameras = ['NikonD850', 'CanonEOS70D', 'CanonEOS700D']
     num_patches = [2, 4, 4, 4]
-    #ratios = [1, 10, 100, 200]
     ratios = [100, 200]
     for camera, num_patch in zip(cameras, num_patches):
         total_psnr = 0.0
         total_ssim = 0.0
         total_samples = 0
         for ratio in ratios:
-            pairs_file_path = os.path.join(datadir, f'{camera}_{ratio}.txt')
-            dataset = ELDDataset(datadir=datadir, camera=camera, pairs_file_path=pairs_file_path,patch_size=None)
+            pairs_file_path = os.path.join(data_dir, f'{camera}_{ratio}.txt')
+            dataset = ELDDataset(data_dir=data_dir, camera=camera, pairs_file_path=pairs_file_path,patch_size=None)
             dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=16, pin_memory=True)
             psnr, ssim, samples = test(model, dataloader, camera=camera, ratio=ratio, 
                                     merge_test=args.merge_test, num_patch=num_patch, with_metainfo=args.with_metainfo)

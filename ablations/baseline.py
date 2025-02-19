@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -87,20 +86,6 @@ class SimpleFuse(nn.Module):
     def forward(self, x, y):
         return self.body(torch.cat([x,y],dim=1))
 
-class ChannelAttention(nn.Module):
-    def __init__(self, num_feat, squeeze_factor=16):
-        super(ChannelAttention, self).__init__()
-        self.attention = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(num_feat, num_feat // squeeze_factor, 1, padding=0),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(num_feat // squeeze_factor, num_feat, 1, padding=0),
-            nn.Sigmoid())
-
-    def forward(self, x):
-        y = self.attention(x)
-        return x * y
-
 class FeedForward(nn.Module):
     def __init__(self, dim, ffn_expansion_factor, bias):
         super(FeedForward, self).__init__()
@@ -114,32 +99,6 @@ class FeedForward(nn.Module):
         self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
 
     def forward(self, x):
-        x = self.project_in(x)
-        x1, x2 = self.dwconv(x).chunk(2, dim=1)
-        x = F.gelu(x1) * x2
-        x = self.project_out(x)
-        return x
-
-
-class RFeedForward(nn.Module):
-    def __init__(self, dim, ffn_expansion_factor, bias):
-        super(RFeedForward, self).__init__()
-
-        hidden_features = int(dim*ffn_expansion_factor)
-
-        self.r_in = nn.Sequential(
-            nn.Conv2d(dim, dim, 1),
-            nn.GELU()
-        )
-        self.project_in = nn.Conv2d(2*dim, hidden_features*2, kernel_size=1, bias=bias)
-
-        self.dwconv = nn.Conv2d(hidden_features*2, hidden_features*2, kernel_size=3, stride=1, padding=1, groups=hidden_features*2, bias=bias)
-
-        self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
-
-    def forward(self, x, r):
-        r = self.r_in(r)
-        x = torch.cat([x, r], dim=1)
         x = self.project_in(x)
         x1, x2 = self.dwconv(x).chunk(2, dim=1)
         x = F.gelu(x1) * x2
@@ -178,13 +137,13 @@ class SelfAttention(nn.Module):
         out = self.project_out(out)
         return out
 
-
-class TransformerBlcok(nn.Module):
-    def __init__(self, dim, num_heads, ffn_expansion_factor=2.66, bias=False, LayerNorm_type='WithBias'):
-        super(TransformerBlcok, self).__init__()
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, num_heads, ffn_expansion_factor, bias, LayerNorm_type):
+        super(TransformerBlock, self).__init__()
 
         self.norm1 = LayerNorm(dim, LayerNorm_type)
         self.attn = SelfAttention(dim, num_heads, bias)
+
         self.norm2 = LayerNorm(dim, LayerNorm_type)
         self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
 
@@ -193,53 +152,50 @@ class TransformerBlcok(nn.Module):
         x = x + self.ffn(self.norm2(x))
         return x
 
-
 from utils.registry import MODEL_REGISTRY
 @MODEL_REGISTRY.register()
 class Baseline(nn.Module):
     def __init__(self, 
-        in_channels=4, 
-        out_channels=4, 
+        in_channels=4,
+        out_channels=4,
         dim=32,
         layers=4,
-        num_blocks=[2,2,2,2], 
-        num_refinement_blocks=2,
-        heads=[1,2,4,8]
+        num_blocks=[1,1,1,1], 
+        heads=[1,2,4,8],
+        ffn_expansion_factor=2.66,
+        bias=False,
+        LayerNorm_type='WithBias'
     ):
 
         super(Baseline, self).__init__()
         assert len(num_blocks) == layers and len(heads) == layers
 
-        self.in_conv = nn.Conv2d(in_channels, dim, 3, padding=1)
-
+        self.conv_in = nn.Sequential(
+            nn.Conv2d(in_channels, dim, 3, padding=1)
+        )
 
         self.encoders = nn.ModuleList([
             nn.ModuleList([
-                TransformerBlcok(int(dim*2**i), heads[i])
+                TransformerBlock(int(dim*2**i), heads[i], ffn_expansion_factor, bias, LayerNorm_type)
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-1)
         ])
         
         self.middle_block = nn.ModuleList([
-            TransformerBlcok(int(dim*2**(layers-1)), heads[layers-1])
+            TransformerBlock(int(dim*2**(layers-1)), heads[layers-1], ffn_expansion_factor, bias, LayerNorm_type)
             for _ in range(num_blocks[layers-1])
         ])
         
         self.decoders = nn.ModuleList([
             nn.ModuleList([
-                TransformerBlcok(int(dim*2**i), heads[i])
+                TransformerBlock(int(dim*2**i), heads[i], ffn_expansion_factor, bias, LayerNorm_type)
                 for _ in range(num_blocks[i])
             ])
             for i in range (layers-2, -1, -1)
         ])
 
         self.downs = nn.ModuleList([
-            Downsample(n_feat=dim*2**i)
-            for i in range (layers-1)
-        ])
-        
-        self.r_downs = nn.ModuleList([
             Downsample(n_feat=dim*2**i)
             for i in range (layers-1)
         ])
@@ -254,30 +210,15 @@ class Baseline(nn.Module):
             for i in range (layers-2, -1, -1)
         ])
         
-        self.refine_conv = nn.Sequential(
-            nn.Conv2d(dim, 2*dim, 3, padding=1, groups=dim),
-            nn.GELU(),
-            nn.Conv2d(2*dim, 2*dim, 1),
-        )
-        
-        self.refinement = nn.ModuleList([
-            TransformerBlcok(dim*2, heads[0])
-            for i in range(num_refinement_blocks)
-        ])
-
         self.output = nn.Sequential(
-            nn.Conv2d(2*dim, 2*dim, 3, padding=1, groups=dim),
-            ChannelAttention(num_feat=2*dim),
-            nn.Conv2d(2*dim, dim, 3, padding=1, groups=dim),
-            nn.GELU(),
-            nn.Conv2d(dim, out_channels, 1)
+            nn.Conv2d(dim, out_channels, 3, padding=1)
         )
 
     def forward(self, x):
         x = self._check_and_padding(x)
         shortcut = x
 
-        x = self.in_conv(x)#c
+        x = self.conv_in(x)#c
 
         encode_features = []
         for encodes, down in zip(self.encoders, self.downs):
@@ -290,6 +231,7 @@ class Baseline(nn.Module):
             x = block(x)
         
         encode_features.reverse()
+
         for up, fuse, feature, decodes in zip(
             self.ups, self.fuses, encode_features, self.decoders
         ):
@@ -297,10 +239,6 @@ class Baseline(nn.Module):
             x = fuse(x, feature)
             for decode in decodes:
                 x = decode(x)
-
-        x = self.refine_conv(x)
-        for refine_block in self.refinement:
-            x = refine_block(x)
 
         x = self.output(x)
         x = x + shortcut
@@ -336,15 +274,35 @@ def cal_model_complexity(model, x):
     print(f"FLOPs: {flops / 1e9} G")
     print(f"Params: {params / 1e6} M")
 
+
 if __name__ == '__main__':
+    from tqdm import tqdm
     model = Baseline(in_channels=4, out_channels=4, dim=32, layers=4,
-                        num_blocks=[2,2,2,4], num_refinement_blocks=2, heads=[1, 2, 4, 8]).cuda()
-    x = torch.rand(1,4,1024,1024).cuda()
+                        num_blocks=[2,2,2,2], heads=[1, 2, 4, 8]).cuda()
+    iterations = 10
+
+    random_input = torch.randn(1, 4, 1024, 1024).cuda()
+    cal_model_complexity(model, random_input)
+
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+    times = torch.zeros(iterations)
+
     with torch.no_grad():
-        cal_model_complexity(model, x)
-        exit(0)
-        import time
-        begin = time.time()
-        x = model(x)
-        end = time.time()
-        print(f'Time comsumed: {end-begin} s')
+        for _ in range(10):
+            _ = model(random_input)
+
+    with torch.no_grad():
+        for iter in tqdm(range(iterations), desc="Measuring Inference Time", unit="iteration"):
+            starter.record()
+            _ = model(random_input)
+            ender.record()
+
+            torch.cuda.synchronize()
+            curr_time = starter.elapsed_time(ender)
+            times[iter] = curr_time
+
+    mean_time = times.mean().item()
+    fps = 1000 / mean_time
+
+    print(f"Inference time: {mean_time:.6f} ms, FPS: {fps:.2f}")

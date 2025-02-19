@@ -295,6 +295,34 @@ if __name__ == '__main__':
     model = NAFNet(img_channel=4, width=32, middle_blk_num=1,
                       enc_blk_nums=[1, 1, 1, 28], dec_blk_nums=[1, 1, 1, 1]).cuda()
 
+    iterations = 10
+
+    random_input = torch.randn(1, 4, 1024, 1024).cuda()
+
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+    times = torch.zeros(iterations)
+
+    with torch.no_grad():
+        for _ in range(10):
+            _ = model(random_input)
+
+    from tqdm import tqdm
+    with torch.no_grad():
+        for iter in tqdm(range(iterations), desc="Measuring Inference Time", unit="iteration"):
+            starter.record()
+            _ = model(random_input)
+            ender.record()
+
+            torch.cuda.synchronize()
+            curr_time = starter.elapsed_time(ender)
+            times[iter] = curr_time
+
+    mean_time = times.mean().item()
+    fps = 1000 / mean_time
+
+    print(f"Inference time: {mean_time:.6f} ms, FPS: {fps:.2f}")
+    exit(0)
     x = torch.rand(1,4,512,512).cuda()
     #x = torch.rand(1,4,1424,1064).cuda()
     cal_model_complexity(model, x)

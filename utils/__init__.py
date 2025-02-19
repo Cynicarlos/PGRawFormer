@@ -100,8 +100,8 @@ def save_checkpoint(config, epoch, model, psnr, max_psnr, optimizer, lr_schedule
     save_path = os.path.join(config['output'], 'checkpoints', 'checkpoint.pth')
     torch.save(save_state, save_path)
     
-    if epoch % 100 == 0:
-        torch.save(save_state, os.path.join(config['output'], 'checkpoints', f'epoch_{epoch}.pth'))
+    #if epoch % 100 == 0:
+    #    torch.save(save_state, os.path.join(config['output'], 'checkpoints', f'epoch_{epoch}.pth'))
 
 def get_grad_norm(parameters, norm_type=2):
     if isinstance(parameters, torch.Tensor):

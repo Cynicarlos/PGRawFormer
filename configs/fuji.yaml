@@ -1,51 +1,46 @@
 name: FUJI
-test_as_valid: true
 manual_seed: 3407 # is all you need
 output: runs
 
 loss:
   types:
-  - L1 #pred_rgb & gt_rgb
-  - L1 #pred_raw & gt_raw
+  - L1
   weights:
-  - 1.0
   - 1.0
 
 data:
   name: SIDFujiDataset
   data_dir: /data/dataset/Carlos/SID/Fuji
-  num_workers: 16
+  num_workers: 8
   pin_memory: true
-  process:
-    max_clip: 1.0
-    min_clip: 0.0
+  argument:
     transpose: true
     h_flip: true
     v_flip: true
-  test:
-    batch_size: 1
-    image_list_file: Fuji_test_list.txt
-    merge_test: true
   train:
     batch_size: 1
-    image_list_file: Fuji_train_list.txt
-    patch_size: 384
-  valid:
+    image_list_file: train_00.txt
+    patch_size: 512
+  test:
     batch_size: 1
-    image_list_file: Fuji_val_list.txt
+    image_list_file: test_00.txt
 
 model:
-  name: TSCDNet
-  TSCDNet:
+  name: PGRawFormer
+  PGRawFormer:
     in_channels: 9
-    base_channels: 32
-    base_d_state: 4
+    out_channels: 9
+    dim: 32
+    layers: 4
+    num_meta_keys: 4
+    num_blocks: [2,2,2,2]
+    heads: [1,2,4,8]
 
 train:
-  base_lr: 1.0e-4
-  last_lr_epoch: 200
+  base_lr: 2.0e-4
+  last_lr_epoch: 500
   clip_grad: 0.1
-  epochs: 250
+  epochs: 500
   lr_scheduler:
     type: cosine
   optimizer: 
@@ -56,4 +51,9 @@ train:
   start_epoch: 0
   weight_decay: 0
   warmup_epochs: 0
+
+test:
+  merge_test: true
+  num_patch: 2 #null, -1, 2, 4
+  patch_size: null
 

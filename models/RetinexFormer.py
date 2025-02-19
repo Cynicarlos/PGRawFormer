@@ -162,7 +162,7 @@ class IG_MSA(nn.Module):
         # q: b,heads,hw,c
         q = q.transpose(-2, -1)
         k = k.transpose(-2, -1)
-        v = v.transpose(-2, -1)
+        v = v.transpose(-2, -1)# (b,n_heads,c,hw)
         q = F.normalize(q, dim=-1, p=2)
         k = F.normalize(k, dim=-1, p=2)
         attn = (k @ q.transpose(-2, -1))   # A = K^T*Q
@@ -339,7 +339,8 @@ class RetinexFormer_Single_Stage(nn.Module):
 
         return output_img
 
-
+from utils.registry import MODEL_REGISTRY
+@MODEL_REGISTRY.register()
 class RetinexFormer(nn.Module):
     def __init__(self, in_channels=3, out_channels=3, n_feat=31, stage=3, num_blocks=[1,1,1]):
         super(RetinexFormer, self).__init__()
@@ -355,9 +356,33 @@ class RetinexFormer(nn.Module):
         x: [b,c,h,w]
         return out:[b,c,h,w]
         """
+        x = self._check_and_padding(x)
         out = self.body(x)
-
+        out = self._check_and_crop(out)
         return out
+
+    def _check_and_padding(self, x):
+        _, _, h, w = x.size()
+        stride = 2**3
+        dh = -h % stride
+        dw = -w % stride
+        top_pad = dh // 2
+        bottom_pad = dh - top_pad
+        left_pad = dw // 2
+        right_pad = dw - left_pad
+        self.crop_indices = (left_pad, w + left_pad, top_pad, h + top_pad)
+
+        # Pad the tensor with reflect mode
+        padded_tensor = F.pad(
+            x, (left_pad, right_pad, top_pad, bottom_pad), mode="reflect"
+        )
+
+        return padded_tensor
+
+    def _check_and_crop(self, x):
+        left, right, top, bottom = self.crop_indices
+        x = x[:, :, top:bottom, left:right]
+        return x
 
 def cal_model_complexity(model, x):
     import thop
@@ -366,13 +391,33 @@ def cal_model_complexity(model, x):
     print(f"Params: {params / 1e6} M")
 
 if __name__ == '__main__':
+    from tqdm import tqdm
+    
     model = RetinexFormer(in_channels=4, out_channels=4, stage=1,n_feat=40,num_blocks=[1,2,2]).cuda()
-    x = torch.rand(1,4,1024,1024).cuda()
+    iterations = 10
+    random_input = torch.randn(1, 4, 1024, 1024).cuda()
+    metainfo = torch.randn(1, 4).cuda()
+    cal_model_complexity(model, random_input)
+
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+    times = torch.zeros(iterations)
+
     with torch.no_grad():
-        cal_model_complexity(model, x)
-        #exit(0)
-        import time
-        begin = time.time()
-        x = model(x)
-        end = time.time()
-        print(f'Time comsumed: {end-begin} s')
+        for _ in range(10):
+            _ = model(random_input)
+
+    with torch.no_grad():
+        for iter in tqdm(range(iterations), desc="Measuring Inference Time", unit="iteration"):
+            starter.record()
+            _ = model(random_input)
+            ender.record()
+
+            torch.cuda.synchronize()
+            curr_time = starter.elapsed_time(ender)
+            times[iter] = curr_time
+
+    mean_time = times.mean().item()
+    fps = 1000 / mean_time
+
+    print(f"Inference time: {mean_time:.6f} ms, FPS: {fps:.2f}")

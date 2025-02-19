@@ -101,10 +101,8 @@ class MCRDataset(data.Dataset):
 
         if self.ratio:
             input_raw = input_raw * info['ratio']
-        if self.max_clip is not None:
-            input_raw = np.minimum(input_raw, self.max_clip)
-        if self.min_clip is not None:
-            input_raw = np.maximum(input_raw, self.min_clip)
+        input_raw = np.maximum(np.minimum(input_raw, 1.0), 0.0)
+        gt_raw = np.maximum(np.minimum(gt_raw, 1.0), 0.0)
 
         gt_rgb = gt_rgb.clip(0.0, 1.0)
 

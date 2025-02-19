@@ -153,9 +153,9 @@ class HDRAB(nn.Module):
     
 
 import sys
-sys.path.append('/root/autodl-tmp/Generalization')
-from utils.registry import MODEL_REGISTRY
-@MODEL_REGISTRY.register()
+#sys.path.append('/root/autodl-tmp/Generalization')
+#from utils.registry import MODEL_REGISTRY
+#@MODEL_REGISTRY.register()
 class DRANet(nn.Module):
     def __init__(self, in_nc=3, out_nc=3, nc=128, bias=True):
         super(DRANet, self).__init__()
@@ -212,20 +212,32 @@ def cal_model_complexity(model, x):
 
 if __name__ == '__main__':
     model = DRANet(in_nc=4, out_nc=4, nc=128).cuda()
-    x = torch.rand(1,4,512,512).cuda()
-    #x = torch.rand(1,4,1424,2128).cuda()
-    #x = torch.rand(1,4,712,1064).cuda()
-    trainable_num = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Params: {trainable_num / 1e6} M")
-    cal_model_complexity(model, x)
-    import time
-    begin = time.time()
-    x = model(x)
-    end = time.time()
-    print(f'Time comsumed: {end-begin} s')
     
-    ''''
-    FLOPs: 2370.561954432 G
-    Params: 1.621098 M
-    Time comsumed: 0.04311418533325195 s
-    '''
+    iterations = 10
+
+    random_input = torch.randn(1, 4, 1024, 1024).cuda()
+
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+    times = torch.zeros(iterations)
+
+    with torch.no_grad():
+        for _ in range(10):
+            _ = model(random_input)
+
+    from tqdm import tqdm
+    with torch.no_grad():
+        for iter in tqdm(range(iterations), desc="Measuring Inference Time", unit="iteration"):
+            starter.record()
+            _ = model(random_input)
+            ender.record()
+
+            torch.cuda.synchronize()
+            curr_time = starter.elapsed_time(ender)
+            times[iter] = curr_time
+
+    mean_time = times.mean().item()
+    fps = 1000 / mean_time
+
+    print(f"Inference time: {mean_time:.6f} ms, FPS: {fps:.2f}")
+    exit(0)
